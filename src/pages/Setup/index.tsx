@@ -57,7 +57,7 @@ const STEP = {
 const steps: SetupStep[] = [
   {
     id: 'welcome',
-    title: 'Welcome to ClawX',
+    title: 'Welcome to MossClaw',
     description: 'Your AI assistant is ready to be configured',
   },
   {
@@ -83,7 +83,7 @@ const steps: SetupStep[] = [
   {
     id: 'complete',
     title: 'All Set!',
-    description: 'ClawX is ready to use',
+    description: 'MossClaw is ready to use',
   },
 ];
 
@@ -317,7 +317,7 @@ function WelcomeContent() {
   return (
     <div className="text-center space-y-4">
       <div className="mb-4 flex justify-center">
-        <img src={clawxIcon} alt="ClawX" className="h-16 w-16" />
+        <img src={clawxIcon} alt="MossClaw" className="h-16 w-16" />
       </div>
       <h2 className="text-xl font-semibold">{t('welcome.title')}</h2>
       <p className="text-muted-foreground">
@@ -715,7 +715,7 @@ function ProviderContent({
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
   const providerMenuRef = useRef<HTMLDivElement | null>(null);
 
-  // On mount, try to restore previously configured provider
+  // On mount, try to restore previously configured provider, or default to 'custom'
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -739,6 +739,12 @@ function ProviderContent({
             onApiKeyChange(storedKey);
           }
         } else if (!cancelled) {
+          // No configured provider — default to 'custom' with preset values
+          onSelectProvider('custom');
+          setSelectedProviderConfigId(null);
+          const customInfo = providers.find((p) => p.id === 'custom');
+          setBaseUrl(customInfo?.defaultBaseUrl || '');
+          setModelId(customInfo?.defaultModelId || '');
           onConfiguredChange(false);
         }
       } catch (error) {

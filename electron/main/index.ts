@@ -126,7 +126,7 @@ async function initialize(): Promise<void> {
     { urls: ['https://openrouter.ai/*'] },
     (details, callback) => {
       details.requestHeaders['HTTP-Referer'] = 'https://claw-x.com';
-      details.requestHeaders['X-Title'] = 'ClawX';
+      details.requestHeaders['X-Title'] = 'MossClaw';
       callback({ requestHeaders: details.requestHeaders });
     },
   );
