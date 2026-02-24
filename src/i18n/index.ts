@@ -32,9 +32,7 @@ import jaCron from './locales/ja/cron.json';
 import jaSetup from './locales/ja/setup.json';
 
 export const SUPPORTED_LANGUAGES = [
-    { code: 'en', label: 'English' },
     { code: 'zh', label: '中文' },
-    { code: 'ja', label: '日本語' },
 ] as const;
 
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];

@@ -61,4 +61,5 @@ resources/bin
 build/
 
 .cursor/
+.codebuddy/
 .pnpm-store/
