@@ -739,6 +739,12 @@ function ProviderContent({
             onApiKeyChange(storedKey);
           }
         } else if (!cancelled) {
+          // No configured provider — default to 'custom' with preset values
+          onSelectProvider('custom');
+          setSelectedProviderConfigId(null);
+          const customInfo = providers.find((p) => p.id === 'custom');
+          setBaseUrl(customInfo?.defaultBaseUrl || '');
+          setModelId(customInfo?.defaultModelId || '');
           onConfiguredChange(false);
         }
       } catch (error) {
