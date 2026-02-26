@@ -14,6 +14,7 @@ import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 
 import { ClawHubService } from '../gateway/clawhub';
+import { ensureClawXContext, repairClawXOnlyBootstrapFiles } from '../utils/openclaw-workspace';
 
 // Disable GPU acceleration for better compatibility
 app.disableHardwareAcceleration();
@@ -177,7 +178,16 @@ async function initialize(): Promise<void> {
     mainWindow = null;
   });
 
-  // Start Gateway automatically
+  // Repair any bootstrap files that only contain ClawX markers (no OpenClaw
+  // template content). This fixes a race condition where ensureClawXContext()
+  // previously created the file before the gateway could seed the full template.
+  try {
+    repairClawXOnlyBootstrapFiles();
+  } catch (error) {
+    logger.warn('Failed to repair bootstrap files:', error);
+  }
+
+  // Start Gateway automatically (this seeds missing bootstrap files with full templates)
   try {
     logger.debug('Auto-starting Gateway...');
     await gatewayManager.start();
@@ -186,6 +196,23 @@ async function initialize(): Promise<void> {
     logger.error('Gateway auto-start failed:', error);
     mainWindow?.webContents.send('gateway:error', String(error));
   }
+
+  // Merge ClawX context snippets into the workspace bootstrap files.
+  // The gateway seeds workspace files asynchronously after its HTTP server
+  // is ready, so ensureClawXContext will retry until the target files appear.
+  void ensureClawXContext().catch((error) => {
+    logger.warn('Failed to merge ClawX context into workspace:', error);
+  });
+
+  // Re-apply ClawX context after every gateway restart because the gateway
+  // may re-seed workspace files with clean templates (losing ClawX markers).
+  gatewayManager.on('status', (status: { state: string }) => {
+    if (status.state === 'running') {
+      void ensureClawXContext().catch((error) => {
+        logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
+      });
+    }
+  });
 }
 
 // Application lifecycle
@@ -197,6 +224,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow();
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      // On macOS, clicking the dock icon should show the window if it's hidden
+      mainWindow.show();
+      mainWindow.focus();
     }
   });
 });
@@ -207,9 +238,13 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', async () => {
+app.on('before-quit', () => {
   isQuitting = true;
-  await gatewayManager.stop();
+  // Fire-and-forget: do not await gatewayManager.stop() here.
+  // Awaiting inside before-quit can stall Electron's quit sequence.
+  void gatewayManager.stop().catch((err) => {
+    logger.warn('gatewayManager.stop() error during quit:', err);
+  });
 });
 
 // Export for testing

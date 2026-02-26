@@ -12,6 +12,8 @@ export const BUILTIN_PROVIDER_TYPES = [
   'openrouter',
   'moonshot',
   'siliconflow',
+  'minimax-portal',
+  'qwen-portal',
   'ollama',
 ] as const;
 export type BuiltinProviderType = (typeof BUILTIN_PROVIDER_TYPES)[number];
@@ -52,7 +54,7 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
   },
   google: {
     envVar: 'GEMINI_API_KEY',
-    defaultModel: 'google/gemini-3-pro-preview',
+    defaultModel: 'google/gemini-3.1-pro-preview',
     // google is built-in to OpenClaw's pi-ai catalog, no providerConfig needed.
     // Adding models.providers.google overrides the built-in and can break Gemini.
   },
@@ -93,6 +95,27 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
       api: 'openai-completions',
       apiKeyEnv: 'SILICONFLOW_API_KEY',
     },
+  },
+  'minimax-portal': {
+    envVar: 'MINIMAX_API_KEY',
+    defaultModel: 'minimax-portal/MiniMax-M2.1',
+    providerConfig: {
+      baseUrl: 'https://api.minimax.io/anthropic',
+      api: 'anthropic-messages',
+      apiKeyEnv: 'MINIMAX_API_KEY',
+    },
+  },
+  'qwen-portal': {
+    envVar: 'QWEN_API_KEY',
+    defaultModel: 'qwen-portal/coder-model',
+    providerConfig: {
+      baseUrl: 'https://portal.qwen.ai/v1',
+      api: 'openai-completions',
+      apiKeyEnv: 'QWEN_API_KEY',
+    },
+  },
+  custom: {
+    envVar: 'CUSTOM_API_KEY',
   },
   // Additional providers with env var mappings but no default model
   groq: { envVar: 'GROQ_API_KEY' },

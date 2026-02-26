@@ -1,7 +1,7 @@
 appId: app.clawx.desktop
 productName: MossClaw
 copyright: Copyright © 2026 MossClaw
-compression: normal
+compression: maximum
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 
 directories:
@@ -21,6 +21,7 @@ extraResources:
       - "!icons/*.md"
       - "!icons/*.svg"
       - "!bin/**"
+      - "!screenshot/**"
   # OpenClaw package (node_modules copied separately by afterPack hook
   # because electron-builder respects .gitignore which excludes node_modules/)
   - from: build/openclaw/
@@ -49,7 +50,6 @@ publish:
   - provider: github
     owner: ValueCell-ai
     repo: ClawX
-    releaseType: release
 
 # macOS Configuration
 mac:
@@ -125,6 +125,9 @@ nsis:
 
 # Linux Configuration
 linux:
+  extraResources:
+    - from: resources/bin/linux-${arch}
+      to: bin
   icon: resources/icons
   target:
     - target: AppImage
