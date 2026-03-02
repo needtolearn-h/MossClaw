@@ -6,6 +6,8 @@
  */
 
 export const BUILTIN_PROVIDER_TYPES = [
+  'aihub-dev',
+  'aihub-prd',
   'anthropic',
   'openai',
   'google',
@@ -38,6 +40,46 @@ interface ProviderBackendMeta {
 }
 
 const REGISTRY: Record<string, ProviderBackendMeta> = {
+  'aihub-dev': {
+    envVar: 'AIHUB_DEV_API_KEY',
+    defaultModel: 'aihub-dev/kimi2-5',
+    providerConfig: {
+      baseUrl: 'http://10.118.10.111:80/s-AIGCLLMP-0012/v1',
+      api: 'openai-completions',
+      apiKeyEnv: 'AIHUB_DEV_API_KEY',
+      models: [
+        {
+          id: 'kimi2-5',
+          name: 'Kimi-k2.5',
+          reasoning: false,
+          input: ['text'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+      ],
+    },
+  },
+  'aihub-prd': {
+    envVar: 'AIHUB_PRD_API_KEY',
+    defaultModel: 'aihub-prd/DeepSeek-v3.2',
+    providerConfig: {
+      baseUrl: 'http://10.66.27.217:80/s-AIGCLLMP-0012/v1',
+      api: 'openai-completions',
+      apiKeyEnv: 'AIHUB_PRD_API_KEY',
+      models: [
+        {
+          id: 'DeepSeek-v3.2',
+          name: 'DeepSeek-v3.2',
+          reasoning: false,
+          input: ['text'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+      ],
+    },
+  },
   anthropic: {
     envVar: 'ANTHROPIC_API_KEY',
     defaultModel: 'anthropic/claude-opus-4-6',
