@@ -103,7 +103,7 @@ const defaultSkills: DefaultSkill[] = [
   { id: 'terminal', name: 'Terminal', description: 'Shell command execution' },
 ];
 
-import { SETUP_PROVIDERS, type ProviderTypeInfo, getProviderIconUrl, shouldInvertInDark } from '@/lib/providers';
+import { SETUP_PROVIDERS, type ProviderTypeInfo, getProviderIconUrl, resolveProviderApiKeyForSave, shouldInvertInDark } from '@/lib/providers';
 import clawxIcon from '@/assets/logo.svg';
 
 // Use the shared provider registry for setup providers
@@ -773,14 +773,28 @@ function ProviderContent({
 
   const handleStartOAuth = async () => {
     if (!selectedProvider) return;
+
+    try {
+      const list = await window.electron.ipcRenderer.invoke('provider:list') as Array<{ type: string }>;
+      const existingTypes = new Set(list.map(l => l.type));
+      if (selectedProvider === 'minimax-portal' && existingTypes.has('minimax-portal-cn')) {
+        toast.error(t('settings:aiProviders.toast.minimaxConflict'));
+        return;
+      }
+      if (selectedProvider === 'minimax-portal-cn' && existingTypes.has('minimax-portal')) {
+        toast.error(t('settings:aiProviders.toast.minimaxConflict'));
+        return;
+      }
+    } catch {
+      // ignore check failure
+    }
+
     setOauthFlowing(true);
     setOauthData(null);
     setOauthError(null);
 
-    // Default to global region for MiniMax in setup
-    const region = 'global';
     try {
-      await window.electron.ipcRenderer.invoke('provider:requestOAuth', selectedProvider, region);
+      await window.electron.ipcRenderer.invoke('provider:requestOAuth', selectedProvider);
     } catch (e) {
       setOauthError(String(e));
       setOauthFlowing(false);
@@ -905,6 +919,21 @@ function ProviderContent({
   const handleValidateAndSave = async () => {
     if (!selectedProvider) return;
 
+    try {
+      const list = await window.electron.ipcRenderer.invoke('provider:list') as Array<{ type: string }>;
+      const existingTypes = new Set(list.map(l => l.type));
+      if (selectedProvider === 'minimax-portal' && existingTypes.has('minimax-portal-cn')) {
+        toast.error(t('settings:aiProviders.toast.minimaxConflict'));
+        return;
+      }
+      if (selectedProvider === 'minimax-portal-cn' && existingTypes.has('minimax-portal')) {
+        toast.error(t('settings:aiProviders.toast.minimaxConflict'));
+        return;
+      }
+    } catch {
+      // ignore check failure
+    }
+
     setValidating(true);
     setKeyValid(null);
 
@@ -941,6 +970,8 @@ function ProviderContent({
             : `custom-${crypto.randomUUID()}`)
           : selectedProvider;
 
+      const effectiveApiKey = resolveProviderApiKeyForSave(selectedProvider, apiKey);
+
       // Save provider config + API key, then set as default
       const saveResult = await window.electron.ipcRenderer.invoke(
         'provider:save',
@@ -954,7 +985,7 @@ function ProviderContent({
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         },
-        apiKey || undefined
+        effectiveApiKey
       ) as { success: boolean; error?: string };
 
       if (!saveResult.success) {

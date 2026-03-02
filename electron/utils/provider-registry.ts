@@ -12,9 +12,11 @@ export const BUILTIN_PROVIDER_TYPES = [
   'openai',
   'google',
   'openrouter',
+  'ark',
   'moonshot',
   'siliconflow',
   'minimax-portal',
+  'minimax-portal-cn',
   'qwen-portal',
   'ollama',
 ] as const;
@@ -36,6 +38,7 @@ interface ProviderBackendMeta {
     api: string;
     apiKeyEnv: string;
     models?: ProviderModelEntry[];
+    headers?: Record<string, string>;
   };
 }
 
@@ -107,6 +110,18 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
       baseUrl: 'https://openrouter.ai/api/v1',
       api: 'openai-completions',
       apiKeyEnv: 'OPENROUTER_API_KEY',
+      headers: {
+        'HTTP-Referer': 'https://claw-x.com',
+        'X-Title': 'ClawX',
+      },
+    },
+  },
+  ark: {
+    envVar: 'ARK_API_KEY',
+    providerConfig: {
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      api: 'openai-completions',
+      apiKeyEnv: 'ARK_API_KEY',
     },
   },
   moonshot: {
@@ -140,11 +155,20 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
   },
   'minimax-portal': {
     envVar: 'MINIMAX_API_KEY',
-    defaultModel: 'minimax-portal/MiniMax-M2.1',
+    defaultModel: 'minimax-portal/MiniMax-M2.5',
     providerConfig: {
       baseUrl: 'https://api.minimax.io/anthropic',
       api: 'anthropic-messages',
       apiKeyEnv: 'MINIMAX_API_KEY',
+    },
+  },
+  'minimax-portal-cn': {
+    envVar: 'MINIMAX_CN_API_KEY',
+    defaultModel: 'minimax-portal/MiniMax-M2.5',
+    providerConfig: {
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      api: 'anthropic-messages',
+      apiKeyEnv: 'MINIMAX_CN_API_KEY',
     },
   },
   'qwen-portal': {
@@ -177,10 +201,10 @@ export function getProviderDefaultModel(type: string): string | undefined {
   return REGISTRY[type]?.defaultModel;
 }
 
-/** Get the OpenClaw provider config (baseUrl, api, apiKeyEnv, models) */
+/** Get the OpenClaw provider config (baseUrl, api, apiKeyEnv, models, headers) */
 export function getProviderConfig(
   type: string
-): { baseUrl: string; api: string; apiKeyEnv: string; models?: ProviderModelEntry[] } | undefined {
+): { baseUrl: string; api: string; apiKeyEnv: string; models?: ProviderModelEntry[]; headers?: Record<string, string> } | undefined {
   return REGISTRY[type]?.providerConfig;
 }
 

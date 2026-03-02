@@ -4,7 +4,7 @@
  * Keys are stored in plain text alongside provider configs in a single electron-store.
  */
 
-import type { ProviderType } from './provider-registry';
+import { BUILTIN_PROVIDER_TYPES, type ProviderType } from './provider-registry';
 import { getActiveOpenClawProviders } from './openclaw-auth';
 
 // Lazy-load electron-store (ESM module)
@@ -214,20 +214,22 @@ export async function getAllProvidersWithKeyInfo(): Promise<
 > {
   const providers = await getAllProviders();
   const results: Array<ProviderConfig & { hasKey: boolean; keyMasked: string | null }> = [];
-  const activeOpenClawProviders = getActiveOpenClawProviders();
-
-  // We need to avoid deleting native ones like 'anthropic' or 'google'
-  // that don't need to exist in openclaw.json models.providers
-  const OpenClawBuiltinList = [
-    'anthropic', 'openai', 'google', 'moonshot', 'siliconflow', 'ollama'
-  ];
+  const activeOpenClawProviders = await getActiveOpenClawProviders();
 
   for (const provider of providers) {
     // Sync check: If it's a custom/OAuth provider and it no longer exists in OpenClaw config
     // (e.g. wiped by Gateway due to missing plugin, or manually deleted by user)
     // we should remove it from ClawX UI to stay consistent.
-    const isBuiltin = OpenClawBuiltinList.includes(provider.type);
-    if (!isBuiltin && !activeOpenClawProviders.has(provider.type) && !activeOpenClawProviders.has(provider.id)) {
+    const isBuiltin = BUILTIN_PROVIDER_TYPES.includes(provider.type);
+    // For custom/ollama providers, the OpenClaw config key is derived as
+    // "<type>-<suffix>" where suffix = first 8 chars of providerId with hyphens stripped.
+    // e.g. provider.id "custom-a1b2c3d4-..." → strip hyphens → "customa1b2c3d4..." → slice(0,8) → "customa1"
+    // → openClawKey = "custom-customa1"
+    // This must match getOpenClawProviderKey() in ipc-handlers.ts exactly.
+    const openClawKey = (provider.type === 'custom' || provider.type === 'ollama')
+      ? `${provider.type}-${provider.id.replace(/-/g, '').slice(0, 8)}`
+      : provider.type === 'minimax-portal-cn' ? 'minimax-portal' : provider.type;
+    if (!isBuiltin && !activeOpenClawProviders.has(provider.type) && !activeOpenClawProviders.has(provider.id) && !activeOpenClawProviders.has(openClawKey)) {
       console.log(`[Sync] Provider ${provider.id} (${provider.type}) missing from OpenClaw, dropping from ClawX UI`);
       await deleteProvider(provider.id);
       continue;
@@ -253,4 +255,3 @@ export async function getAllProvidersWithKeyInfo(): Promise<
 
   return results;
 }
-

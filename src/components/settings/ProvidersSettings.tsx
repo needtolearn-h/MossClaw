@@ -29,6 +29,7 @@ import {
   PROVIDER_TYPE_INFO,
   type ProviderType,
   getProviderIconUrl,
+  resolveProviderApiKeyForSave,
   shouldInvertInDark,
 } from '@/lib/providers';
 import { cn } from '@/lib/utils';
@@ -66,6 +67,7 @@ export function ProvidersSettings() {
     // Only custom supports multiple instances.
     // Built-in providers remain singleton by type.
     const id = type === 'custom' ? `custom-${crypto.randomUUID()}` : type;
+    const effectiveApiKey = resolveProviderApiKeyForSave(type, apiKey);
     try {
       await addProvider(
         {
@@ -76,7 +78,7 @@ export function ProvidersSettings() {
           model: options?.model,
           enabled: true,
         },
-        apiKey.trim() || undefined
+        effectiveApiKey
       );
 
       // Auto-set as default if no default is currently configured
@@ -261,6 +263,12 @@ function ProviderCard({
         }
       }
 
+      // Keep Ollama key optional in UI, but persist a placeholder when
+      // editing legacy configs that have no stored key.
+      if (provider.type === 'ollama' && !provider.hasKey && !payload.newApiKey) {
+        payload.newApiKey = resolveProviderApiKeyForSave(provider.type, '') as string;
+      }
+
       if (!payload.newApiKey && !payload.updates) {
         onCancelEdit();
         setSaving(false);
@@ -326,6 +334,19 @@ function ProviderCard({
                   </div>
                 )}
               </>
+            )}
+            {typeInfo?.apiKeyUrl && (
+              <div className="flex justify-start mb-1">
+                <a
+                  href={typeInfo.apiKeyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-primary hover:underline flex items-center gap-1"
+                  tabIndex={-1}
+                >
+                  {t('aiProviders.oauth.getApiKey')} <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
             )}
             <div className="flex gap-2">
               <div className="relative flex-1">
@@ -487,20 +508,19 @@ function AddProviderDialog({ existingTypes, onClose, onAdd, onValidateKey }: Add
       setOauthFlowing(false);
       setOauthData(null);
       setValidationError(null);
-      const { selectedType: type, typeInfo: info, onAdd: add, onClose: close, t: translate } = latestRef.current;
-      // Save the provider to the store so the list refreshes automatically
-      if (type && add) {
-        try {
-          await add(
-            type,
-            info?.name || type,
-            '', // OAuth providers don't use a plain API key
-            { model: info?.defaultModelId }
-          );
-        } catch {
-          // provider may already exist; ignore duplicate errors
-        }
+
+      const { onClose: close, t: translate } = latestRef.current;
+
+      // device-oauth.ts already saved the provider config to the backend,
+      // including the dynamically resolved baseUrl for the region (e.g. CN vs Global).
+      // If we call add() here with undefined baseUrl, it will overwrite and erase it!
+      // So we just fetch the latest list from the backend to update the UI.
+      try {
+        await useProviderStore.getState().fetchProviders();
+      } catch (err) {
+        console.error('Failed to refresh providers after OAuth:', err);
       }
+
       close();
       toast.success(translate('aiProviders.toast.added'));
     };
@@ -525,12 +545,22 @@ function AddProviderDialog({ existingTypes, onClose, onAdd, onValidateKey }: Add
 
   const handleStartOAuth = async () => {
     if (!selectedType) return;
+
+    if (selectedType === 'minimax-portal' && existingTypes.has('minimax-portal-cn')) {
+      toast.error(t('aiProviders.toast.minimaxConflict'));
+      return;
+    }
+    if (selectedType === 'minimax-portal-cn' && existingTypes.has('minimax-portal')) {
+      toast.error(t('aiProviders.toast.minimaxConflict'));
+      return;
+    }
+
     setOauthFlowing(true);
     setOauthData(null);
     setOauthError(null);
 
     try {
-      await window.electron.ipcRenderer.invoke('provider:requestOAuth', selectedType, 'global');
+      await window.electron.ipcRenderer.invoke('provider:requestOAuth', selectedType);
     } catch (e) {
       setOauthError(String(e));
       setOauthFlowing(false);
@@ -551,6 +581,15 @@ function AddProviderDialog({ existingTypes, onClose, onAdd, onValidateKey }: Add
 
   const handleAdd = async () => {
     if (!selectedType) return;
+
+    if (selectedType === 'minimax-portal' && existingTypes.has('minimax-portal-cn')) {
+      toast.error(t('aiProviders.toast.minimaxConflict'));
+      return;
+    }
+    if (selectedType === 'minimax-portal-cn' && existingTypes.has('minimax-portal')) {
+      toast.error(t('aiProviders.toast.minimaxConflict'));
+      return;
+    }
 
     setSaving(true);
     setValidationError(null);
@@ -690,7 +729,20 @@ function AddProviderDialog({ existingTypes, onClose, onAdd, onValidateKey }: Add
               {/* API Key input — shown for non-OAuth providers or when apikey mode is selected */}
               {(!isOAuth || (supportsApiKey && authMode === 'apikey')) && (
                 <div className="space-y-2">
-                  <Label htmlFor="apiKey">{t('aiProviders.dialog.apiKey')}</Label>
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="apiKey">{t('aiProviders.dialog.apiKey')}</Label>
+                    {typeInfo?.apiKeyUrl && (
+                      <a
+                        href={typeInfo.apiKeyUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-primary hover:underline flex items-center gap-1"
+                        tabIndex={-1}
+                      >
+                        {t('aiProviders.oauth.getApiKey')} <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
                   <div className="relative">
                     <Input
                       id="apiKey"

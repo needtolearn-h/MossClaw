@@ -15,13 +15,27 @@ import { warmupNetworkOptimization } from '../utils/uv-env';
 
 import { ClawHubService } from '../gateway/clawhub';
 import { ensureClawXContext, repairClawXOnlyBootstrapFiles } from '../utils/openclaw-workspace';
+import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../utils/openclaw-cli';
+import { isQuitting, setQuitting } from './app-state';
 
-// Disable GPU acceleration for better compatibility
+// Disable GPU hardware acceleration globally for maximum stability across
+// all GPU configurations (no GPU, integrated, discrete).
+//
+// Rationale (following VS Code's philosophy):
+// - Page/file loading is async data fetching — zero GPU dependency.
+// - The original per-platform GPU branching was added to avoid CPU rendering
+//   competing with sync I/O on Windows, but all file I/O is now async
+//   (fs/promises), so that concern no longer applies.
+// - Software rendering is deterministic across all hardware; GPU compositing
+//   behaviour varies between vendors (Intel, AMD, NVIDIA, Apple Silicon) and
+//   driver versions, making it the #1 source of rendering bugs in Electron.
+//
+// Users who want GPU acceleration can pass `--enable-gpu` on the CLI or
+// set `"disable-hardware-acceleration": false` in the app config (future).
 app.disableHardwareAcceleration();
 
 // Global references
 let mainWindow: BrowserWindow | null = null;
-let isQuitting = false;
 const gatewayManager = new GatewayManager();
 const clawHubService = new ClawHubService();
 
@@ -122,40 +136,28 @@ async function initialize(): Promise<void> {
   // Create system tray
   createTray(mainWindow);
 
-  // Inject OpenRouter site headers (HTTP-Referer & X-Title) for rankings on openrouter.ai
-  session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: ['https://openrouter.ai/*'] },
+  // Override security headers ONLY for the OpenClaw Gateway Control UI.
+  // The URL filter ensures this callback only fires for gateway requests,
+  // avoiding unnecessary overhead on every other HTTP response.
+  session.defaultSession.webRequest.onHeadersReceived(
+    { urls: ['http://127.0.0.1:18789/*', 'http://localhost:18789/*'] },
     (details, callback) => {
-      details.requestHeaders['HTTP-Referer'] = 'https://claw-x.com';
-      details.requestHeaders['X-Title'] = 'MossClaw';
-      callback({ requestHeaders: details.requestHeaders });
+      const headers = { ...details.responseHeaders };
+      delete headers['X-Frame-Options'];
+      delete headers['x-frame-options'];
+      if (headers['Content-Security-Policy']) {
+        headers['Content-Security-Policy'] = headers['Content-Security-Policy'].map(
+          (csp) => csp.replace(/frame-ancestors\s+'none'/g, "frame-ancestors 'self' *")
+        );
+      }
+      if (headers['content-security-policy']) {
+        headers['content-security-policy'] = headers['content-security-policy'].map(
+          (csp) => csp.replace(/frame-ancestors\s+'none'/g, "frame-ancestors 'self' *")
+        );
+      }
+      callback({ responseHeaders: headers });
     },
   );
-
-  // Override security headers ONLY for the OpenClaw Gateway Control UI
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const isGatewayUrl = details.url.includes('127.0.0.1:18789') || details.url.includes('localhost:18789');
-
-    if (!isGatewayUrl) {
-      callback({ responseHeaders: details.responseHeaders });
-      return;
-    }
-
-    const headers = { ...details.responseHeaders };
-    delete headers['X-Frame-Options'];
-    delete headers['x-frame-options'];
-    if (headers['Content-Security-Policy']) {
-      headers['Content-Security-Policy'] = headers['Content-Security-Policy'].map(
-        (csp) => csp.replace(/frame-ancestors\s+'none'/g, "frame-ancestors 'self' *")
-      );
-    }
-    if (headers['content-security-policy']) {
-      headers['content-security-policy'] = headers['content-security-policy'].map(
-        (csp) => csp.replace(/frame-ancestors\s+'none'/g, "frame-ancestors 'self' *")
-      );
-    }
-    callback({ responseHeaders: headers });
-  });
 
   // Register IPC handlers
   registerIpcHandlers(gatewayManager, clawHubService, mainWindow);
@@ -168,7 +170,7 @@ async function initialize(): Promise<void> {
 
   // Minimize to tray on close instead of quitting (macOS & Windows)
   mainWindow.on('close', (event) => {
-    if (!isQuitting) {
+    if (!isQuitting()) {
       event.preventDefault();
       mainWindow?.hide();
     }
@@ -181,11 +183,9 @@ async function initialize(): Promise<void> {
   // Repair any bootstrap files that only contain ClawX markers (no OpenClaw
   // template content). This fixes a race condition where ensureClawXContext()
   // previously created the file before the gateway could seed the full template.
-  try {
-    repairClawXOnlyBootstrapFiles();
-  } catch (error) {
+  void repairClawXOnlyBootstrapFiles().catch((error) => {
     logger.warn('Failed to repair bootstrap files:', error);
-  }
+  });
 
   // Start Gateway automatically (this seeds missing bootstrap files with full templates)
   try {
@@ -202,6 +202,16 @@ async function initialize(): Promise<void> {
   // is ready, so ensureClawXContext will retry until the target files appear.
   void ensureClawXContext().catch((error) => {
     logger.warn('Failed to merge ClawX context into workspace:', error);
+  });
+
+  // Auto-install openclaw CLI and shell completions (non-blocking).
+  void autoInstallCliIfNeeded((installedPath) => {
+    mainWindow?.webContents.send('openclaw:cli-installed', installedPath);
+  }).then(() => {
+    generateCompletionCache();
+    installCompletionToProfile();
+  }).catch((error) => {
+    logger.warn('CLI auto-install failed:', error);
   });
 
   // Re-apply ClawX context after every gateway restart because the gateway
@@ -239,7 +249,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  isQuitting = true;
+  setQuitting();
   // Fire-and-forget: do not await gatewayManager.stop() here.
   // Awaiting inside before-quit can stall Electron's quit sequence.
   void gatewayManager.stop().catch((err) => {

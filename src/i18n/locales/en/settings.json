@@ -53,13 +53,15 @@
       "updated": "Provider updated",
       "failedUpdate": "Failed to update provider",
       "invalidKey": "Invalid API key",
-      "modelRequired": "Model ID is required"
+      "modelRequired": "Model ID is required",
+      "minimaxConflict": "Cannot add both MiniMax (Global) and MiniMax (CN) providers."
     },
     "oauth": {
       "loginMode": "OAuth Login",
       "apikeyMode": "API Key",
       "loginPrompt": "This provider requires signing in via your browser.",
       "loginButton": "Login with Browser",
+      "getApiKey": "Get API Key",
       "waiting": "Waiting...",
       "openLoginPage": "Open Login Page",
       "waitingApproval": "Waiting for approval in browser...",
