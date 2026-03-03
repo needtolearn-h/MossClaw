@@ -88,8 +88,9 @@ export class ClawHubService {
 
             const isWin = process.platform === 'win32';
             const useShell = isWin && !this.useNodeRunner;
+            const { NODE_OPTIONS: _nodeOptions, ...baseEnv } = process.env;
             const env = {
-                ...process.env,
+                ...baseEnv,
                 CI: 'true',
                 FORCE_COLOR: '0',
             };
@@ -105,6 +106,7 @@ export class ClawHubService {
                     ...env,
                     CLAWHUB_WORKDIR: this.workDir,
                 },
+                windowsHide: true,
             });
 
             let stdout = '';

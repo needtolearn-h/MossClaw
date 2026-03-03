@@ -30,6 +30,8 @@ export interface ProviderConfig {
   type: ProviderType;
   baseUrl?: string;
   model?: string;
+  fallbackModels?: string[];
+  fallbackProviderIds?: string[];
   enabled: boolean;
   createdAt: string;
   updatedAt: string;

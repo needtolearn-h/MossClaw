@@ -266,7 +266,13 @@ function cleanupBundle(outputDir) {
       'tsconfig.json', '.npmignore', '.eslintrc', '.prettierrc', '.editorconfig',
     ]);
 
-    function walkExt(dir, insideNodeModules) {
+    // .md files inside skills/ directories are runtime content (SKILL.md,
+    // block-types.md, etc.) and must NOT be removed.
+    const JUNK_MD_NAMES = new Set([
+      'README.md', 'CHANGELOG.md', 'LICENSE.md', 'CONTRIBUTING.md',
+    ]);
+
+    function walkExt(dir, insideNodeModules, insideSkills) {
       let entries;
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
       for (const entry of entries) {
@@ -275,7 +281,11 @@ function cleanupBundle(outputDir) {
           if (insideNodeModules && NM_REMOVE_DIRS.has(entry.name)) {
             if (rmSafe(full)) removedCount++;
           } else {
-            walkExt(full, insideNodeModules || entry.name === 'node_modules');
+            walkExt(
+              full,
+              insideNodeModules || entry.name === 'node_modules',
+              insideSkills || entry.name === 'skills',
+            );
           }
         } else if (entry.isFile()) {
           if (insideNodeModules) {
@@ -284,14 +294,19 @@ function cleanupBundle(outputDir) {
               if (rmSafe(full)) removedCount++;
             }
           } else {
-            if (JUNK_EXTS.has(path.extname(entry.name)) || entry.name.endsWith('.md')) {
+            // Inside skills/ directories, .md files are skill content — keep them.
+            // Outside skills/, remove known junk .md files only.
+            const isMd = entry.name.endsWith('.md');
+            const isJunkMd = isMd && JUNK_MD_NAMES.has(entry.name);
+            const isJunkExt = JUNK_EXTS.has(path.extname(entry.name));
+            if (isJunkExt || (isMd && !insideSkills && isJunkMd)) {
               if (rmSafe(full)) removedCount++;
             }
           }
         }
       }
     }
-    walkExt(ext, false);
+    walkExt(ext, false, false);
   }
 
   // --- node_modules: remove unnecessary file types and directories ---
@@ -351,7 +366,50 @@ const sizeAfter = getDirSize(OUTPUT);
 echo`   Removed ${cleanedCount} files/directories`;
 echo`   Size: ${formatSize(sizeBefore)} → ${formatSize(sizeAfter)} (saved ${formatSize(sizeBefore - sizeAfter)})`;
 
-// 7. Verify the bundle
+// 7. Patch known broken packages
+//
+// Some packages in the ecosystem have transpiled CJS output that sets
+// `module.exports = exports.default` without ever assigning `exports.default`,
+// resulting in `module.exports = undefined`.  This causes a TypeError in
+// Node.js 22+ ESM interop when the translators try to call hasOwnProperty on
+// the undefined exports object.
+//
+// We patch these files in-place after the copy so the bundle is safe to run.
+function patchBrokenModules(nodeModulesDir) {
+  const patches = {
+    // node-domexception@1.0.0: transpiled index.js leaves module.exports = undefined.
+    // Node.js 18+ ships DOMException as a built-in global, so a simple shim works.
+    'node-domexception/index.js': [
+      `'use strict';`,
+      `// Shim: the original transpiled file sets module.exports = exports.default`,
+      `// (which is undefined), causing TypeError in Node.js 22+ ESM interop.`,
+      `// Node.js 18+ has DOMException as a built-in global.`,
+      `const dom = globalThis.DOMException ||`,
+      `  class DOMException extends Error {`,
+      `    constructor(msg, name) { super(msg); this.name = name || 'Error'; }`,
+      `  };`,
+      `module.exports = dom;`,
+      `module.exports.DOMException = dom;`,
+      `module.exports.default = dom;`,
+    ].join('\n'),
+  };
+
+  let count = 0;
+  for (const [rel, content] of Object.entries(patches)) {
+    const target = path.join(nodeModulesDir, rel);
+    if (fs.existsSync(target)) {
+      fs.writeFileSync(target, content + '\n', 'utf8');
+      count++;
+    }
+  }
+  if (count > 0) {
+    echo`   🩹 Patched ${count} broken module(s) in node_modules`;
+  }
+}
+
+patchBrokenModules(outputNodeModules);
+
+// 8. Verify the bundle
 const entryExists = fs.existsSync(path.join(OUTPUT, 'openclaw.mjs'));
 const distExists = fs.existsSync(path.join(OUTPUT, 'dist', 'entry.js'));
 

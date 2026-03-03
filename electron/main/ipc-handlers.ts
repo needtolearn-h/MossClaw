@@ -16,6 +16,7 @@ import {
   hasApiKey,
   saveProvider,
   getProvider,
+  getAllProviders,
   deleteProvider,
   setDefaultProvider,
   getDefaultProvider,
@@ -24,7 +25,7 @@ import {
 } from '../utils/secure-storage';
 import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
-import { getSetting } from '../utils/store';
+import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
 import {
   saveProviderKeyToOpenClaw,
   removeProviderFromOpenClaw,
@@ -48,7 +49,11 @@ import { checkUvInstalled, installUv, setupManagedPython } from '../utils/uv-set
 import { updateSkillConfig, getSkillConfig, getAllSkillConfigs } from '../utils/skill-config';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { getProviderConfig } from '../utils/provider-registry';
+import { getProviderDefaultModel } from '../utils/provider-registry';
 import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
+import { applyProxySettings } from './proxy';
+import { proxyAwareFetch } from '../utils/proxy-fetch';
+import { getRecentTokenUsageHistory } from '../utils/token-usage';
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -68,6 +73,54 @@ export function getOpenClawProviderKey(type: string, providerId: string): string
     return 'minimax-portal';
   }
   return type;
+}
+
+function getProviderModelRef(config: ProviderConfig): string | undefined {
+  const providerKey = getOpenClawProviderKey(config.type, config.id);
+
+  if (config.model) {
+    return config.model.startsWith(`${providerKey}/`)
+      ? config.model
+      : `${providerKey}/${config.model}`;
+  }
+
+  return getProviderDefaultModel(config.type);
+}
+
+async function getProviderFallbackModelRefs(config: ProviderConfig): Promise<string[]> {
+  const allProviders = await getAllProviders();
+  const providerMap = new Map(allProviders.map((provider) => [provider.id, provider]));
+  const seen = new Set<string>();
+  const results: string[] = [];
+  const providerKey = getOpenClawProviderKey(config.type, config.id);
+
+  for (const fallbackModel of config.fallbackModels ?? []) {
+    const normalizedModel = fallbackModel.trim();
+    if (!normalizedModel) continue;
+
+    const modelRef = normalizedModel.startsWith(`${providerKey}/`)
+      ? normalizedModel
+      : `${providerKey}/${normalizedModel}`;
+
+    if (seen.has(modelRef)) continue;
+    seen.add(modelRef);
+    results.push(modelRef);
+  }
+
+  for (const fallbackId of config.fallbackProviderIds ?? []) {
+    if (!fallbackId || fallbackId === config.id) continue;
+
+    const fallbackProvider = providerMap.get(fallbackId);
+    if (!fallbackProvider) continue;
+
+    const modelRef = getProviderModelRef(fallbackProvider);
+    if (!modelRef || seen.has(modelRef)) continue;
+
+    seen.add(modelRef);
+    results.push(modelRef);
+  }
+
+  return results;
 }
 
 /**
@@ -99,11 +152,17 @@ export function registerIpcHandlers(
   // App handlers
   registerAppHandlers();
 
+  // Settings handlers
+  registerSettingsHandlers(gatewayManager);
+
   // UV handlers
   registerUvHandlers();
 
   // Log handlers (for UI to read gateway/app logs)
   registerLogHandlers();
+
+  // Usage handlers
+  registerUsageHandlers();
 
   // Skill config handlers (direct file access, no Gateway RPC)
   registerSkillConfigHandlers();
@@ -1098,6 +1157,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 
         // Sync the provider configuration to openclaw.json so Gateway knows about it
         try {
+          const fallbackModels = await getProviderFallbackModelRefs(nextConfig);
           const meta = getProviderConfig(nextConfig.type);
           const api = nextConfig.type === 'custom' || nextConfig.type === 'ollama' ? 'openai-completions' : meta?.api;
 
@@ -1132,12 +1192,12 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
               ? `${ock}/${nextConfig.model}`
               : undefined;
             if (nextConfig.type !== 'custom' && nextConfig.type !== 'ollama') {
-              await setOpenClawDefaultModel(nextConfig.type, modelOverride);
+              await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);
             } else {
               await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
                 baseUrl: nextConfig.baseUrl,
                 api: 'openai-completions',
-              });
+              }, fallbackModels);
             }
           }
 
@@ -1213,6 +1273,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
         try {
           const ock = getOpenClawProviderKey(provider.type, providerId);
           const providerKey = await getApiKey(providerId);
+          const fallbackModels = await getProviderFallbackModelRefs(provider);
 
           // OAuth providers (qwen-portal, minimax-portal, minimax-portal-cn) might use OAuth OR a direct API key.
           // Treat them as OAuth only if they don't have a local API key configured.
@@ -1231,9 +1292,9 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
               await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
                 baseUrl: provider.baseUrl,
                 api: 'openai-completions',
-              });
+              }, fallbackModels);
             } else {
-              await setOpenClawDefaultModel(provider.type, modelOverride);
+              await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);
             }
 
             // Keep auth-profiles in sync with the default provider instance.
@@ -1261,13 +1322,13 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
               ? 'minimax-portal'
               : provider.type;
 
-            await setOpenClawDefaultModelWithOverride(targetProviderKey, undefined, {
+            await setOpenClawDefaultModelWithOverride(targetProviderKey, getProviderModelRef(provider), {
               baseUrl,
               api,
               authHeader: targetProviderKey === 'minimax-portal' ? true : undefined,
               // Relies on OpenClaw Gateway native auth-profiles syncing
               apiKeyEnv: targetProviderKey === 'minimax-portal' ? 'minimax-oauth' : 'qwen-oauth',
-            });
+            }, fallbackModels);
 
             logger.info(`Configured openclaw.json for OAuth provider "${provider.type}"`);
 
@@ -1303,7 +1364,10 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
           }
 
           // Debounced restart so the gateway picks up the new default provider.
-          if (gatewayManager.isConnected()) {
+          // Because OAuth success triggers a debounced restart, the gateway might not be
+          // currently connected ('starting' or 'reconnecting'). Checking if it is simply
+          // not 'stopped' ensures the restart request is correctly queued or coalesced.
+          if (gatewayManager.getStatus().state !== 'stopped') {
             logger.info(`Scheduling Gateway restart after provider switch to "${ock}"`);
             gatewayManager.debouncedRestart();
           }
@@ -1474,7 +1538,7 @@ async function performProviderValidationRequest(
 ): Promise<{ valid: boolean; error?: string }> {
   try {
     logValidationRequest(providerLabel, 'GET', url, headers);
-    const response = await fetch(url, { headers });
+    const response = await proxyAwareFetch(url, { headers });
     logValidationStatus(providerLabel, response.status);
     const data = await response.json().catch(() => ({}));
     return classifyAuthResponse(response.status, data);
@@ -1549,7 +1613,7 @@ async function performChatCompletionsProbe(
 ): Promise<{ valid: boolean; error?: string }> {
   try {
     logValidationRequest(providerLabel, 'POST', url, headers);
-    const response = await fetch(url, {
+    const response = await proxyAwareFetch(url, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1751,6 +1815,75 @@ function registerAppHandlers(): void {
   });
 }
 
+function registerSettingsHandlers(gatewayManager: GatewayManager): void {
+  const handleProxySettingsChange = async () => {
+    const settings = await getAllSettings();
+    await applyProxySettings(settings);
+    if (gatewayManager.getStatus().state === 'running') {
+      await gatewayManager.restart();
+    }
+  };
+
+  ipcMain.handle('settings:get', async (_, key: keyof AppSettings) => {
+    return await getSetting(key);
+  });
+
+  ipcMain.handle('settings:getAll', async () => {
+    return await getAllSettings();
+  });
+
+  ipcMain.handle('settings:set', async (_, key: keyof AppSettings, value: AppSettings[keyof AppSettings]) => {
+    await setSetting(key, value as never);
+
+    if (
+      key === 'proxyEnabled' ||
+      key === 'proxyServer' ||
+      key === 'proxyHttpServer' ||
+      key === 'proxyHttpsServer' ||
+      key === 'proxyAllServer' ||
+      key === 'proxyBypassRules'
+    ) {
+      await handleProxySettingsChange();
+    }
+
+    return { success: true };
+  });
+
+  ipcMain.handle('settings:setMany', async (_, patch: Partial<AppSettings>) => {
+    const entries = Object.entries(patch) as Array<[keyof AppSettings, AppSettings[keyof AppSettings]]>;
+    for (const [key, value] of entries) {
+      await setSetting(key, value as never);
+    }
+
+    if (entries.some(([key]) =>
+      key === 'proxyEnabled' ||
+      key === 'proxyServer' ||
+      key === 'proxyHttpServer' ||
+      key === 'proxyHttpsServer' ||
+      key === 'proxyAllServer' ||
+      key === 'proxyBypassRules'
+    )) {
+      await handleProxySettingsChange();
+    }
+
+    return { success: true };
+  });
+
+  ipcMain.handle('settings:reset', async () => {
+    await resetSettings();
+    const settings = await getAllSettings();
+    await handleProxySettingsChange();
+    return { success: true, settings };
+  });
+}
+function registerUsageHandlers(): void {
+  ipcMain.handle('usage:recentTokenHistory', async (_, limit?: number) => {
+    const safeLimit = typeof limit === 'number' && Number.isFinite(limit)
+      ? Math.min(Math.max(Math.floor(limit), 1), 100)
+      : 20;
+    return await getRecentTokenUsageHistory(safeLimit);
+  });
+}
 /**
  * Window control handlers (for custom title bar on Windows/Linux)
  */

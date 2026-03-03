@@ -17,6 +17,9 @@ import { ClawHubService } from '../gateway/clawhub';
 import { ensureClawXContext, repairClawXOnlyBootstrapFiles } from '../utils/openclaw-workspace';
 import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../utils/openclaw-cli';
 import { isQuitting, setQuitting } from './app-state';
+import { applyProxySettings } from './proxy';
+import { getSetting } from '../utils/store';
+import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -127,6 +130,9 @@ async function initialize(): Promise<void> {
   // Warm up network optimization (non-blocking)
   void warmupNetworkOptimization();
 
+  // Apply persisted proxy settings before creating windows or network requests.
+  await applyProxySettings();
+
   // Set application menu
   createMenu();
 
@@ -187,14 +193,25 @@ async function initialize(): Promise<void> {
     logger.warn('Failed to repair bootstrap files:', error);
   });
 
+  // Pre-deploy built-in skills (feishu-doc, feishu-drive, feishu-perm, feishu-wiki)
+  // to ~/.openclaw/skills/ so they are immediately available without manual install.
+  void ensureBuiltinSkillsInstalled().catch((error) => {
+    logger.warn('Failed to install built-in skills:', error);
+  });
+
   // Start Gateway automatically (this seeds missing bootstrap files with full templates)
-  try {
-    logger.debug('Auto-starting Gateway...');
-    await gatewayManager.start();
-    logger.info('Gateway auto-start succeeded');
-  } catch (error) {
-    logger.error('Gateway auto-start failed:', error);
-    mainWindow?.webContents.send('gateway:error', String(error));
+  const gatewayAutoStart = await getSetting('gatewayAutoStart');
+  if (gatewayAutoStart) {
+    try {
+      logger.debug('Auto-starting Gateway...');
+      await gatewayManager.start();
+      logger.info('Gateway auto-start succeeded');
+    } catch (error) {
+      logger.error('Gateway auto-start failed:', error);
+      mainWindow?.webContents.send('gateway:error', String(error));
+    }
+  } else {
+    logger.info('Gateway auto-start disabled in settings');
   }
 
   // Merge ClawX context snippets into the workspace bootstrap files.
