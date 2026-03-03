@@ -74,8 +74,8 @@ i18n
     .use(initReactI18next)
     .init({
         resources,
-        lng: 'en', // will be overridden by settings store
-        fallbackLng: 'en',
+        lng: 'zh', // will be overridden by settings store
+        fallbackLng: 'zh',
         defaultNS: 'common',
         ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup'],
         interpolation: {

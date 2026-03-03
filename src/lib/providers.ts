@@ -72,17 +72,9 @@ import { providerIcons } from '@/assets/providers';
 
 /** All supported provider types with UI metadata */
 export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
-  { id: 'anthropic', name: 'Anthropic', icon: '🤖', placeholder: 'sk-ant-api03-...', model: 'Claude', requiresApiKey: true },
-  { id: 'openai', name: 'OpenAI', icon: '💚', placeholder: 'sk-proj-...', model: 'GPT', requiresApiKey: true },
-  { id: 'google', name: 'Google', icon: '🔷', placeholder: 'AIza...', model: 'Gemini', requiresApiKey: true },
-  { id: 'openrouter', name: 'OpenRouter', icon: '🌐', placeholder: 'sk-or-v1-...', model: 'Multi-Model', requiresApiKey: true },
-  { id: 'ark', name: 'ByteDance Ark', icon: 'A', placeholder: 'your-ark-api-key', model: 'Doubao', requiresApiKey: true, defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3', showBaseUrl: true, showModelId: true, modelIdPlaceholder: 'ep-20260228000000-xxxxx' },
-  { id: 'moonshot', name: 'Moonshot (CN)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.cn/v1', defaultModelId: 'kimi-k2.5' },
-  { id: 'siliconflow', name: 'SiliconFlow (CN)', icon: '🌊', placeholder: 'sk-...', model: 'Multi-Model', requiresApiKey: true, defaultBaseUrl: 'https://api.siliconflow.cn/v1', defaultModelId: 'Pro/moonshotai/Kimi-K2.5' },
-  { id: 'minimax-portal', name: 'MiniMax (Global)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, defaultModelId: 'MiniMax-M2.5', apiKeyUrl: 'https://intl.minimaxi.com/' },
-  { id: 'minimax-portal-cn', name: 'MiniMax (CN)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, defaultModelId: 'MiniMax-M2.5', apiKeyUrl: 'https://platform.minimaxi.com/' },
+  { id: 'aihub-dev', name: '国信AIHUB(办公网)', icon: 'aihub', placeholder: 'API key...', model: 'Kimi-K2.5', requiresApiKey: true, showBaseUrl: true, defaultBaseUrl: 'http://10.118.10.111:80/s-AIGCLLMP-0012/v1', defaultModelId: 'kimi2-5' },
+  { id: 'aihub-prd', name: '国信AIHUB(生产网)', icon: 'aihub', placeholder: 'API key...', model: 'DeepSeek-V3.2', requiresApiKey: true, showBaseUrl: true, defaultBaseUrl: 'http://10.66.27.217:80/s-AIGCLLMP-0012/v1', defaultModelId: 'DeepSeek-v3.2' },
   { id: 'qwen-portal', name: 'Qwen', icon: '☁️', placeholder: 'sk-...', model: 'Qwen', requiresApiKey: false, isOAuth: true, defaultModelId: 'coder-model' },
-  { id: 'ollama', name: 'Ollama', icon: '🦙', placeholder: 'Not required', requiresApiKey: false, defaultBaseUrl: 'http://localhost:11434/v1', showBaseUrl: true, showModelId: true, modelIdPlaceholder: 'qwen3:latest' },
   { id: 'custom', name: 'Custom', icon: '⚙️', placeholder: 'API key...', requiresApiKey: true, showBaseUrl: true, showModelId: true, modelIdPlaceholder: 'your-provider/model-id' },
 ];
 
