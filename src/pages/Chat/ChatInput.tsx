@@ -29,6 +29,8 @@ interface ChatInputProps {
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
+  inputText?: string;
+  onInputChange?: (text: string) => void;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -75,11 +77,24 @@ function readFileAsBase64(file: globalThis.File): Promise<string> {
 
 // ── Component ────────────────────────────────────────────────────
 
-export function ChatInput({ onSend, onStop, disabled = false, sending = false }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, disabled = false, sending = false, inputText, onInputChange }: ChatInputProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+
+  // Sync with external inputText prop
+  useEffect(() => {
+    if (inputText !== undefined) {
+      setInput(inputText);
+    }
+  }, [inputText]);
+
+  // Handle local input changes
+  const handleLocalInputChange = useCallback((value: string) => {
+    setInput(value);
+    onInputChange?.(value);
+  }, [onInputChange]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -352,7 +367,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             <Textarea
               ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => handleLocalInputChange(e.target.value)}
               onKeyDown={handleKeyDown}
               onCompositionStart={() => {
                 isComposingRef.current = true;

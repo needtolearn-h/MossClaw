@@ -4,8 +4,8 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useEffect, useRef, useState } from 'react';
-import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { AlertCircle, FileText, Loader2, MessageSquare, Sparkles } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
@@ -17,9 +17,10 @@ import { extractImages, extractText, extractThinking, extractToolUse } from './m
 import { useTranslation } from 'react-i18next';
 
 export function Chat() {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
+  const currentLang = i18n.language;
 
   const messages = useChatStore((s) => s.messages);
   const loading = useChatStore((s) => s.loading);
@@ -37,6 +38,39 @@ export function Chat() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [inputValue, setInputValue] = useState<string>('');
+
+  // Get guide examples from i18n
+  const guideExamples = useMemo(() => {
+    const lang = currentLang?.split('-')[0] || 'zh';
+    const bundle = i18n.getResourceBundle(lang, 'chat');
+    return {
+      fileOrganize: bundle?.welcome?.guide?.fileOrganize?.examples || [],
+      documentProcessing: bundle?.welcome?.guide?.documentProcessing?.examples || [],
+      scheduledTasks: bundle?.welcome?.guide?.scheduledTasks?.examples || [],
+    };
+  }, [i18n, currentLang]);
+
+  // Handle category selection from welcome screen
+  const handleCategorySelect = useCallback((categoryKey: string) => {
+    setSelectedCategory(categoryKey);
+  }, []);
+
+  // Handle example click - fill input but don't send
+  const handleExampleClick = useCallback((text: string) => {
+    setInputValue(text);
+    setSelectedCategory(null);
+  }, []);
+
+  // Close examples when clicking outside or pressing escape
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedCategory(null);
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, []);
 
   // Load data when gateway is running.
   // When the store already holds messages for this session (i.e. the user
@@ -100,6 +134,9 @@ export function Chat() {
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus);
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
 
+  // Get examples for selected category
+  const currentExamples = selectedCategory ? guideExamples[selectedCategory as keyof typeof guideExamples] : [];
+
   return (
     <div className="flex flex-col -m-6" style={{ height: 'calc(100vh - 2.5rem)' }}>
       {/* Toolbar */}
@@ -108,14 +145,14 @@ export function Chat() {
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         <div className="max-w-4xl mx-auto space-y-4">
           {loading && !sending ? (
             <div className="flex h-full items-center justify-center py-20">
               <LoadingSpinner size="lg" />
             </div>
           ) : messages.length === 0 && !sending ? (
-            <WelcomeScreen />
+            <WelcomeScreen onCategorySelect={handleCategorySelect} />
           ) : (
             <>
               {messages.map((msg, idx) => (
@@ -182,44 +219,108 @@ export function Chat() {
         </div>
       )}
 
+      {/* Examples Popover - shown when category is selected */}
+      {selectedCategory && currentExamples.length > 0 && (
+        <ExamplesPopover
+          examples={currentExamples}
+          onExampleClick={handleExampleClick}
+          onClose={() => setSelectedCategory(null)}
+        />
+      )}
+
       {/* Input Area */}
       <ChatInput
         onSend={sendMessage}
         onStop={abortRun}
         disabled={!isGatewayRunning}
         sending={sending}
+        inputText={inputValue}
+        onInputChange={setInputValue}
       />
+    </div>
+  );
+}
+
+// ── Examples Popover ────────────────────────────────────────────
+
+function ExamplesPopover({
+  examples,
+  onExampleClick,
+  onClose,
+}: {
+  examples: string[];
+  onExampleClick: (text: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="px-4 py-2 bg-muted/30 border-t border-border">
+      <div className="max-w-4xl mx-auto">
+        <div className="flex items-center justify-end mb-2">
+          <button
+            onClick={onClose}
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="space-y-1.5">
+          {examples.map((example: string, idx: number) => (
+            <button
+              key={idx}
+              onClick={() => onExampleClick(example)}
+              className="text-left w-full p-2 rounded-md bg-background hover:bg-muted/80 border border-border hover:border-primary/40 transition-all text-xs text-muted-foreground hover:text-foreground flex items-center gap-2 group"
+            >
+              <span className="shrink-0">
+                <svg className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949A3.286 3.286 0 016 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+              </span>
+              <span className="flex-1 truncate">{example}</span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
 // ── Welcome Screen ──────────────────────────────────────────────
 
-function WelcomeScreen() {
+function WelcomeScreen({ onCategorySelect }: { onCategorySelect?: (key: string) => void }) {
   const { t } = useTranslation('chat');
+
+  const guideCategories = [
+    { key: 'fileOrganize', icon: MessageSquare, titleKey: 'welcome.guide.fileOrganize.title' },
+    { key: 'documentProcessing', icon: FileText, titleKey: 'welcome.guide.documentProcessing.title' },
+    { key: 'scheduledTasks', icon: Sparkles, titleKey: 'welcome.guide.scheduledTasks.title' },
+  ];
+
   return (
-    <div className="flex flex-col items-center justify-center text-center py-20">
-      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mb-6">
-        <Bot className="h-8 w-8 text-white" />
+    <div className="flex flex-col items-center justify-center text-center py-12">
+      <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center mb-6">
+        <img src="/src/assets/logo.svg" alt="Logo" className="h-16 w-16" />
       </div>
       <h2 className="text-2xl font-bold mb-2">{t('welcome.title')}</h2>
       <p className="text-muted-foreground mb-8 max-w-md">
         {t('welcome.subtitle')}
       </p>
 
-      <div className="grid grid-cols-2 gap-4 max-w-lg w-full">
-        {[
-          { icon: MessageSquare, title: t('welcome.askQuestions'), desc: t('welcome.askQuestionsDesc') },
-          { icon: Sparkles, title: t('welcome.creativeTasks'), desc: t('welcome.creativeTasksDesc') },
-        ].map((item, i) => (
-          <Card key={i} className="text-left">
-            <CardContent className="p-4">
-              <item.icon className="h-6 w-6 text-primary mb-2" />
-              <h3 className="font-medium">{item.title}</h3>
-              <p className="text-sm text-muted-foreground">{item.desc}</p>
-            </CardContent>
-          </Card>
-        ))}
+      {/* Guide Categories */}
+      <div className="w-full max-w-2xl">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {guideCategories.map((category) => (
+            <Card
+              key={category.key}
+              className="cursor-pointer hover:border-primary/50 hover:bg-muted/50 transition-all"
+              onClick={() => onCategorySelect?.(category.key)}
+            >
+              <CardContent className="p-6 text-center">
+                <category.icon className="h-8 w-8 text-primary mx-auto mb-3" />
+                <h4 className="font-medium">{t(category.titleKey)}</h4>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     </div>
   );

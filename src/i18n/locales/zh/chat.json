@@ -7,7 +7,33 @@
         "askQuestions": "提问",
         "askQuestionsDesc": "获取任何话题的答案",
         "creativeTasks": "创意任务",
-        "creativeTasksDesc": "写作、头脑风暴、创意"
+        "creativeTasksDesc": "写作、头脑风暴、创意",
+        "guide": {
+            "fileOrganize": {
+                "title": "文件整理",
+                "examples": [
+                    "帮我整理这个项目的代码结构，输出一个树状目录",
+                    "分析这份文档的摘要，提取关键信息",
+                    "帮我格式化这段代码，并添加注释"
+                ]
+            },
+            "documentProcessing": {
+                "title": "文档处理",
+                "examples": [
+                    "帮我写一份项目 README 文档",
+                    "把这段会议记录整理成结构化的纪要",
+                    "帮我翻译这份技术文档为中文"
+                ]
+            },
+            "scheduledTasks": {
+                "title": "定时任务",
+                "examples": [
+                    "创建一个每天早会前发送日报的定时任务",
+                    "设置每周五自动收集团队周报的提醒",
+                    "如何配置 cron 表达式来每小时检查一次消息？"
+                ]
+            }
+        }
     },
     "noLogs": "（暂无日志）",
     "toolbar": {

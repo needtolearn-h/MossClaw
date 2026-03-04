@@ -7,7 +7,35 @@
         "askQuestions": "Ask Questions",
         "askQuestionsDesc": "Get answers on any topic",
         "creativeTasks": "Creative Tasks",
-        "creativeTasksDesc": "Writing, brainstorming, ideas"
+        "creativeTasksDesc": "Writing, brainstorming, ideas",
+        "guide": {
+            "title": "Quick Start",
+            "subtitle": "Try these example questions",
+            "fileOrganize": {
+                "title": "File Organization",
+                "examples": [
+                    "Help me organize the code structure of this project and output a tree diagram",
+                    "Analyze this document and extract the key information",
+                    "Help me format this code and add comments"
+                ]
+            },
+            "documentProcessing": {
+                "title": "Document Processing",
+                "examples": [
+                    "Help me write a README document for this project",
+                    "Organize this meeting record into a structured summary",
+                    "Help me translate this technical document to Chinese"
+                ]
+            },
+            "scheduledTasks": {
+                "title": "Scheduled Tasks",
+                "examples": [
+                    "Create a scheduled task to send daily reports before morning meetings",
+                    "Set up a reminder to collect team weekly reports every Friday",
+                    "How to configure cron expression to check messages every hour?"
+                ]
+            }
+        }
     },
     "noLogs": "(No logs available yet)",
     "toolbar": {
