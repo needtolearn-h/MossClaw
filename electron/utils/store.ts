@@ -59,7 +59,7 @@ export interface AppSettings {
 const defaults: AppSettings = {
   // General
   theme: 'system',
-  language: 'en',
+  language: 'zh',
   startMinimized: false,
   launchAtStartup: false,
   

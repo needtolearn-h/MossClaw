@@ -30,7 +30,6 @@ import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranslation } from 'react-i18next';
-import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { toast } from 'sonner';
 import {
   CHANNEL_META,
@@ -313,7 +312,6 @@ export function Setup() {
 
 function WelcomeContent() {
   const { t } = useTranslation(['setup', 'settings']);
-  const { language, setLanguage } = useSettingsStore();
 
   return (
     <div className="text-center space-y-4">
@@ -324,21 +322,6 @@ function WelcomeContent() {
       <p className="text-muted-foreground">
         {t('welcome.description')}
       </p>
-
-      {/* Language Selector */}
-      <div className="flex justify-center gap-2 py-2">
-        {SUPPORTED_LANGUAGES.map((lang) => (
-          <Button
-            key={lang.code}
-            variant={language === lang.code ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={() => setLanguage(lang.code)}
-            className="h-7 text-xs"
-          >
-            {lang.label}
-          </Button>
-        ))}
-      </div>
 
       <ul className="text-left space-y-2 text-muted-foreground pt-2">
         <li className="flex items-center gap-2">

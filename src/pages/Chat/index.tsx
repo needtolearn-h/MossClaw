@@ -15,6 +15,7 @@ import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
 import { useTranslation } from 'react-i18next';
+import logoSvg from '@/assets/logo.svg';
 
 export function Chat() {
   const { t, i18n } = useTranslation('chat');
@@ -298,7 +299,7 @@ function WelcomeScreen({ onCategorySelect }: { onCategorySelect?: (key: string) 
   return (
     <div className="flex flex-col items-center justify-center text-center py-12">
       <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center mb-6">
-        <img src="/src/assets/logo.svg" alt="Logo" className="h-16 w-16" />
+        <img src={logoSvg} alt="Logo" className="h-16 w-16" />
       </div>
       <h2 className="text-2xl font-bold mb-2">{t('welcome.title')}</h2>
       <p className="text-muted-foreground mb-8 max-w-md">
