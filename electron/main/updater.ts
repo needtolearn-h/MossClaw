@@ -13,7 +13,8 @@ import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
 
 /** Base CDN URL (without trailing channel path) */
-const OSS_BASE_URL = 'https://oss.intelli-spectrum.com';
+// const OSS_BASE_URL = 'https://oss.intelli-spectrum.com';
+const OSS_BASE_URL = 'http://10.118.11.23:5000';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -55,6 +56,34 @@ export class AppUpdater extends EventEmitter {
     
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;
+    // 在开发环境下测试检查更新使用
+    // autoUpdater.forceDevUpdateConfig = true;
+
+    // 设置url
+    let platform = "";
+    let arch = "";
+    if (process.platform === "darwin") {
+      platform = "osx";
+      if (process.arch === "arm64") {
+        arch = "arm64";
+      } else {
+        arch = "64";
+      }
+    } else if (process.platform === "win32") {
+      platform = "windows";
+      if (process.arch === "x64") {
+        arch = "64";
+      } else {
+        arch = "32";
+      }
+    } else if (process.platform === "linux") {
+      platform = "linux";
+      if (process.arch === "x64") {
+        arch = "64";
+      } else {
+        arch = "32";
+      }
+    }
     
     autoUpdater.logger = {
       info: (msg: string) => logger.info('[Updater]', msg),
@@ -67,7 +96,8 @@ export class AppUpdater extends EventEmitter {
     // alpha -> /alpha/alpha-mac.yml, beta -> /beta/beta-mac.yml, etc.
     const version = app.getVersion();
     const channel = detectChannel(version);
-    const feedUrl = `${OSS_BASE_URL}/${channel}`;
+    // const feedUrl = `${OSS_BASE_URL}/${channel}`;
+    const feedUrl = `${OSS_BASE_URL}/update/${platform}_${arch}`;
 
     logger.info(`[Updater] Version: ${version}, channel: ${channel}, feedUrl: ${feedUrl}`);
 
