@@ -118,8 +118,6 @@ win:
 nsis:
   oneClick: false
   perMachine: false
-  # Avoid NSIS build failure: warning 6010 (_ci_StrContains "not referenced") is emitted when
-  # building the uninstaller, because that function is only used in the install macro.
   warningsAsErrors: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
@@ -167,19 +165,22 @@ linux:
       Comment: AI Assistant powered by OpenClaw
       Categories: Utility;Network;
       Keywords: ai;assistant;automation;chat;
+      StartupWMClass: MossClaw
 
 appImage:
   license: LICENSE
 
 deb:
   depends:
-    - libgtk-3-0
-    - libnotify4
+    # Use OR syntax to support both Ubuntu 22.04 and Ubuntu 24.04 (t64 transition).
+    # Ubuntu 24.04 renamed many libraries with a t64 suffix (64-bit time_t ABI transition).
+    - libgtk-3-0 | libgtk-3-0t64
+    - libnotify4 | libnotify4t64
     - libnss3
-    - libxss1
-    - libxtst6
+    - libxss1 | libxss1t64
+    - libxtst6 | libxtst6t64
     - xdg-utils
-    - libatspi2.0-0
+    - libatspi2.0-0 | libatspi2.0-0t64
     - libuuid1
   afterInstall: scripts/linux/after-install.sh
   afterRemove: scripts/linux/after-remove.sh

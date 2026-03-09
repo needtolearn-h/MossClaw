@@ -2,12 +2,14 @@
  * Settings Page
  * Application configuration
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Sun,
   Moon,
   Monitor,
   RefreshCw,
+  ChevronDown,
+  ChevronRight,
   Terminal,
   ExternalLink,
   Key,
@@ -28,8 +30,22 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import { ProvidersSettings } from '@/components/settings/ProvidersSettings';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
+import {
+  getGatewayWsDiagnosticEnabled,
+  invokeIpc,
+  setGatewayWsDiagnosticEnabled,
+  toUserMessage,
+} from '@/lib/api-client';
+import {
+  clearUiTelemetry,
+  getUiTelemetrySnapshot,
+  subscribeUiTelemetry,
+  trackUiEvent,
+  type UiTelemetryEntry,
+} from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
+import { hostApiFetch } from '@/lib/host-api';
 type ControlUiInfo = {
   url: string;
   token: string;
@@ -77,7 +93,11 @@ export function Settings() {
   const [proxyAllServerDraft, setProxyAllServerDraft] = useState('');
   const [proxyBypassRulesDraft, setProxyBypassRulesDraft] = useState('');
   const [proxyEnabledDraft, setProxyEnabledDraft] = useState(false);
+  const [showAdvancedProxy, setShowAdvancedProxy] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
+  const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
+  const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
+  const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
 
   const isWindows = window.electron.platform === 'win32';
   const showCliTools = true;
@@ -86,8 +106,8 @@ export function Settings() {
 
   const handleShowLogs = async () => {
     try {
-      const logs = await window.electron.ipcRenderer.invoke('log:readFile', 100) as string;
-      setLogContent(logs);
+      const logs = await hostApiFetch<{ content: string }>('/api/logs?tailLines=100');
+      setLogContent(logs.content);
       setShowLogs(true);
     } catch {
       setLogContent('(Failed to load logs)');
@@ -97,9 +117,9 @@ export function Settings() {
 
   const handleOpenLogDir = async () => {
     try {
-      const logDir = await window.electron.ipcRenderer.invoke('log:getDir') as string;
+      const { dir: logDir } = await hostApiFetch<{ dir: string | null }>('/api/logs/dir');
       if (logDir) {
-        await window.electron.ipcRenderer.invoke('shell:showItemInFolder', logDir);
+        await invokeIpc('shell:showItemInFolder', logDir);
       }
     } catch {
       // ignore
@@ -109,15 +129,16 @@ export function Settings() {
   // Open developer console
   const openDevConsole = async () => {
     try {
-      const result = await window.electron.ipcRenderer.invoke('gateway:getControlUiUrl') as {
+      const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         token?: string;
         port?: number;
         error?: string;
-      };
+      }>('/api/gateway/control-ui');
       if (result.success && result.url && result.token && typeof result.port === 'number') {
         setControlUiInfo({ url: result.url, token: result.token, port: result.port });
+        trackUiEvent('settings.open_dev_console');
         window.electron.openExternal(result.url);
       } else {
         console.error('Failed to get Dev Console URL:', result.error);
@@ -129,12 +150,12 @@ export function Settings() {
 
   const refreshControlUiInfo = async () => {
     try {
-      const result = await window.electron.ipcRenderer.invoke('gateway:getControlUiUrl') as {
+      const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         token?: string;
         port?: number;
-      };
+      }>('/api/gateway/control-ui');
       if (result.success && result.url && result.token && typeof result.port === 'number') {
         setControlUiInfo({ url: result.url, token: result.token, port: result.port });
       }
@@ -159,11 +180,11 @@ export function Settings() {
 
     (async () => {
       try {
-        const result = await window.electron.ipcRenderer.invoke('openclaw:getCliCommand') as {
+        const result = await invokeIpc<{
           success: boolean;
           command?: string;
           error?: string;
-        };
+        }>('openclaw:getCliCommand');
         if (cancelled) return;
         if (result.success && result.command) {
           setOpenclawCliCommand(result.command);
@@ -204,6 +225,25 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
+    setWsDiagnosticEnabled(getGatewayWsDiagnosticEnabled());
+  }, []);
+
+  useEffect(() => {
+    if (!devModeUnlocked) return;
+    setTelemetryEntries(getUiTelemetrySnapshot(200));
+    const unsubscribe = subscribeUiTelemetry((entry) => {
+      setTelemetryEntries((prev) => {
+        const next = [...prev, entry];
+        if (next.length > 200) {
+          next.splice(0, next.length - 200);
+        }
+        return next;
+      });
+    });
+    return unsubscribe;
+  }, [devModeUnlocked]);
+
+  useEffect(() => {
     setProxyEnabledDraft(proxyEnabled);
   }, [proxyEnabled]);
 
@@ -235,7 +275,7 @@ export function Settings() {
       const normalizedHttpsServer = proxyHttpsServerDraft.trim();
       const normalizedAllServer = proxyAllServerDraft.trim();
       const normalizedBypassRules = proxyBypassRulesDraft.trim();
-      await window.electron.ipcRenderer.invoke('settings:setMany', {
+      await invokeIpc('settings:setMany', {
         proxyEnabled: proxyEnabledDraft,
         proxyServer: normalizedProxyServer,
         proxyHttpServer: normalizedHttpServer,
@@ -252,15 +292,107 @@ export function Settings() {
       setProxyEnabled(proxyEnabledDraft);
 
       toast.success(t('gateway.proxySaved'));
+      trackUiEvent('settings.proxy_saved', { enabled: proxyEnabledDraft });
     } catch (error) {
-      toast.error(`${t('gateway.proxySaveFailed')}: ${String(error)}`);
+      toast.error(`${t('gateway.proxySaveFailed')}: ${toUserMessage(error)}`);
     } finally {
       setSavingProxy(false);
     }
   };
 
+  const telemetryStats = useMemo(() => {
+    let errorCount = 0;
+    let slowCount = 0;
+    for (const entry of telemetryEntries) {
+      if (entry.event.endsWith('_error') || entry.event.includes('request_error')) {
+        errorCount += 1;
+      }
+      const durationMs = typeof entry.payload.durationMs === 'number'
+        ? entry.payload.durationMs
+        : Number.NaN;
+      if (Number.isFinite(durationMs) && durationMs >= 800) {
+        slowCount += 1;
+      }
+    }
+    return { total: telemetryEntries.length, errorCount, slowCount };
+  }, [telemetryEntries]);
+
+  const telemetryByEvent = useMemo(() => {
+    const map = new Map<string, {
+      event: string;
+      count: number;
+      errorCount: number;
+      slowCount: number;
+      totalDuration: number;
+      timedCount: number;
+      lastTs: string;
+    }>();
+
+    for (const entry of telemetryEntries) {
+      const current = map.get(entry.event) ?? {
+        event: entry.event,
+        count: 0,
+        errorCount: 0,
+        slowCount: 0,
+        totalDuration: 0,
+        timedCount: 0,
+        lastTs: entry.ts,
+      };
+
+      current.count += 1;
+      current.lastTs = entry.ts;
+
+      if (entry.event.endsWith('_error') || entry.event.includes('request_error')) {
+        current.errorCount += 1;
+      }
+
+      const durationMs = typeof entry.payload.durationMs === 'number'
+        ? entry.payload.durationMs
+        : Number.NaN;
+      if (Number.isFinite(durationMs)) {
+        current.totalDuration += durationMs;
+        current.timedCount += 1;
+        if (durationMs >= 800) {
+          current.slowCount += 1;
+        }
+      }
+
+      map.set(entry.event, current);
+    }
+
+    return [...map.values()]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 12);
+  }, [telemetryEntries]);
+
+  const handleCopyTelemetry = async () => {
+    try {
+      const serialized = telemetryEntries.map((entry) => JSON.stringify(entry)).join('\n');
+      await navigator.clipboard.writeText(serialized);
+      toast.success(t('developer.telemetryCopied'));
+    } catch (error) {
+      toast.error(`${t('common:status.error')}: ${String(error)}`);
+    }
+  };
+
+  const handleClearTelemetry = () => {
+    clearUiTelemetry();
+    setTelemetryEntries([]);
+    toast.success(t('developer.telemetryCleared'));
+  };
+
+  const handleWsDiagnosticToggle = (enabled: boolean) => {
+    setGatewayWsDiagnosticEnabled(enabled);
+    setWsDiagnosticEnabled(enabled);
+    toast.success(
+      enabled
+        ? t('developer.wsDiagnosticEnabled')
+        : t('developer.wsDiagnosticDisabled'),
+    );
+  };
+
   return (
-    <div className="space-y-6 p-6">
+    <div className="flex flex-col gap-6 p-6">
       <div>
         <h1 className="text-2xl font-bold">{t('title')}</h1>
         <p className="text-muted-foreground">
@@ -269,7 +401,7 @@ export function Settings() {
       </div>
 
       {/* Appearance */}
-      <Card>
+      <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('appearance.title')}</CardTitle>
           <CardDescription>{t('appearance.description')}</CardDescription>
@@ -323,7 +455,7 @@ export function Settings() {
       </Card>
 
       {/* AI Providers */}
-      <Card>
+      <Card className="order-2">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Key className="h-5 w-5" />
@@ -337,7 +469,7 @@ export function Settings() {
       </Card>
 
       {/* Gateway */}
-      <Card>
+      <Card className="order-1">
         <CardHeader>
           <CardTitle>{t('gateway.title')}</CardTitle>
           <CardDescription>{t('gateway.description')}</CardDescription>
@@ -410,108 +542,129 @@ export function Settings() {
 
           <Separator />
 
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <Label>{t('gateway.proxyTitle')}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t('gateway.proxyDesc')}
-                </p>
+          {devModeUnlocked ? (
+            <div className="space-y-4">
+              <div className="rounded-md border border-border/60 p-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start"
+                  onClick={() => setShowAdvancedProxy((prev) => !prev)}
+                >
+                  {showAdvancedProxy ? (
+                    <ChevronDown className="h-4 w-4 mr-2" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4 mr-2" />
+                  )}
+                  {showAdvancedProxy ? t('gateway.hideAdvancedProxy') : t('gateway.showAdvancedProxy')}
+                </Button>
+                {showAdvancedProxy && (
+                  <div className="mt-3 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label>{t('gateway.proxyTitle')}</Label>
+                        <p className="text-sm text-muted-foreground">
+                          {t('gateway.proxyDesc')}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={proxyEnabledDraft}
+                        onCheckedChange={setProxyEnabledDraft}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="proxy-server">{t('gateway.proxyServer')}</Label>
+                      <Input
+                        id="proxy-server"
+                        value={proxyServerDraft}
+                        onChange={(event) => setProxyServerDraft(event.target.value)}
+                        placeholder="http://127.0.0.1:7890"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t('gateway.proxyServerHelp')}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="proxy-http-server">{t('gateway.proxyHttpServer')}</Label>
+                      <Input
+                        id="proxy-http-server"
+                        value={proxyHttpServerDraft}
+                        onChange={(event) => setProxyHttpServerDraft(event.target.value)}
+                        placeholder={proxyServerDraft || 'http://127.0.0.1:7890'}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t('gateway.proxyHttpServerHelp')}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="proxy-https-server">{t('gateway.proxyHttpsServer')}</Label>
+                      <Input
+                        id="proxy-https-server"
+                        value={proxyHttpsServerDraft}
+                        onChange={(event) => setProxyHttpsServerDraft(event.target.value)}
+                        placeholder={proxyServerDraft || 'http://127.0.0.1:7890'}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t('gateway.proxyHttpsServerHelp')}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="proxy-all-server">{t('gateway.proxyAllServer')}</Label>
+                      <Input
+                        id="proxy-all-server"
+                        value={proxyAllServerDraft}
+                        onChange={(event) => setProxyAllServerDraft(event.target.value)}
+                        placeholder={proxyServerDraft || 'socks5://127.0.0.1:7891'}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t('gateway.proxyAllServerHelp')}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="proxy-bypass">{t('gateway.proxyBypass')}</Label>
+                      <Input
+                        id="proxy-bypass"
+                        value={proxyBypassRulesDraft}
+                        onChange={(event) => setProxyBypassRulesDraft(event.target.value)}
+                        placeholder="<local>;localhost;127.0.0.1;::1"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t('gateway.proxyBypassHelp')}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 p-3">
+                      <p className="text-sm text-muted-foreground">
+                        {t('gateway.proxyRestartNote')}
+                      </p>
+                      <Button
+                        variant="outline"
+                        onClick={handleSaveProxySettings}
+                        disabled={savingProxy}
+                      >
+                        <RefreshCw className={`h-4 w-4 mr-2${savingProxy ? ' animate-spin' : ''}`} />
+                        {savingProxy ? t('common:status.saving') : t('common:actions.save')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
-              <Switch
-                checked={proxyEnabledDraft}
-                onCheckedChange={setProxyEnabledDraft}
-              />
             </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="proxy-server">{t('gateway.proxyServer')}</Label>
-              <Input
-                id="proxy-server"
-                value={proxyServerDraft}
-                onChange={(event) => setProxyServerDraft(event.target.value)}
-                placeholder="http://127.0.0.1:7890"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('gateway.proxyServerHelp')}
-              </p>
+          ) : (
+            <div className="rounded-md border border-border/60 bg-muted/30 p-4 text-sm text-muted-foreground">
+              {t('advanced.devModeDesc')}
             </div>
-
-            {devModeUnlocked && (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="proxy-http-server">{t('gateway.proxyHttpServer')}</Label>
-                  <Input
-                    id="proxy-http-server"
-                    value={proxyHttpServerDraft}
-                    onChange={(event) => setProxyHttpServerDraft(event.target.value)}
-                    placeholder={proxyServerDraft || 'http://127.0.0.1:7890'}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('gateway.proxyHttpServerHelp')}
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="proxy-https-server">{t('gateway.proxyHttpsServer')}</Label>
-                  <Input
-                    id="proxy-https-server"
-                    value={proxyHttpsServerDraft}
-                    onChange={(event) => setProxyHttpsServerDraft(event.target.value)}
-                    placeholder={proxyServerDraft || 'http://127.0.0.1:7890'}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('gateway.proxyHttpsServerHelp')}
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="proxy-all-server">{t('gateway.proxyAllServer')}</Label>
-                  <Input
-                    id="proxy-all-server"
-                    value={proxyAllServerDraft}
-                    onChange={(event) => setProxyAllServerDraft(event.target.value)}
-                    placeholder={proxyServerDraft || 'socks5://127.0.0.1:7891'}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('gateway.proxyAllServerHelp')}
-                  </p>
-                </div>
-              </>
-            )}
-
-            <div className="space-y-2">
-              <Label htmlFor="proxy-bypass">{t('gateway.proxyBypass')}</Label>
-              <Input
-                id="proxy-bypass"
-                value={proxyBypassRulesDraft}
-                onChange={(event) => setProxyBypassRulesDraft(event.target.value)}
-                placeholder="<local>;localhost;127.0.0.1;::1"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('gateway.proxyBypassHelp')}
-              </p>
-            </div>
-
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 p-3">
-              <p className="text-sm text-muted-foreground">
-                {t('gateway.proxyRestartNote')}
-              </p>
-              <Button
-                variant="outline"
-                onClick={handleSaveProxySettings}
-                disabled={savingProxy}
-              >
-                <RefreshCw className={`h-4 w-4 mr-2${savingProxy ? ' animate-spin' : ''}`} />
-                {savingProxy ? t('common:status.saving') : t('common:actions.save')}
-              </Button>
-            </div>
-          </div>
+          )}
         </CardContent>
       </Card>
 
       {/* Updates */}
-      <Card>
+      <Card className="order-2">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Download className="h-5 w-5" />
@@ -556,7 +709,7 @@ export function Settings() {
       </Card>
 
       {/* Advanced */}
-      <Card>
+      <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('advanced.title')}</CardTitle>
           <CardDescription>{t('advanced.description')}</CardDescription>
@@ -579,7 +732,7 @@ export function Settings() {
 
       {/* Developer */}
       {devModeUnlocked && (
-        <Card>
+        <Card className="order-2">
           <CardHeader>
             <CardTitle>{t('developer.title')}</CardTitle>
             <CardDescription>{t('developer.description')}</CardDescription>
@@ -664,12 +817,116 @@ export function Settings() {
                 </div>
               </>
             )}
+
+            <Separator />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between rounded-md border border-border/60 p-3">
+                <div>
+                  <Label>{t('developer.wsDiagnostic')}</Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('developer.wsDiagnosticDesc')}
+                  </p>
+                </div>
+                <Switch
+                  checked={wsDiagnosticEnabled}
+                  onCheckedChange={handleWsDiagnosticToggle}
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>{t('developer.telemetryViewer')}</Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('developer.telemetryViewerDesc')}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowTelemetryViewer((prev) => !prev)}
+                >
+                  {showTelemetryViewer
+                    ? t('common:actions.hide')
+                    : t('common:actions.show')}
+                </Button>
+              </div>
+
+              {showTelemetryViewer && (
+                <div className="space-y-3 rounded-lg border border-border/60 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{t('developer.telemetryTotal')}: {telemetryStats.total}</Badge>
+                    <Badge variant={telemetryStats.errorCount > 0 ? 'destructive' : 'secondary'}>
+                      {t('developer.telemetryErrors')}: {telemetryStats.errorCount}
+                    </Badge>
+                    <Badge variant={telemetryStats.slowCount > 0 ? 'secondary' : 'outline'}>
+                      {t('developer.telemetrySlow')}: {telemetryStats.slowCount}
+                    </Badge>
+                    <div className="ml-auto flex gap-2">
+                      <Button type="button" variant="outline" size="sm" onClick={handleCopyTelemetry}>
+                        <Copy className="h-4 w-4 mr-2" />
+                        {t('common:actions.copy')}
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" onClick={handleClearTelemetry}>
+                        {t('common:actions.clear')}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="max-h-72 overflow-auto rounded-md border border-border/50 bg-muted/20">
+                    {telemetryByEvent.length > 0 && (
+                      <div className="border-b border-border/50 bg-background/70 p-2">
+                        <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
+                          {t('developer.telemetryAggregated')}
+                        </p>
+                        <div className="space-y-1 text-[11px]">
+                          {telemetryByEvent.map((item) => (
+                            <div
+                              key={item.event}
+                              className="grid grid-cols-[minmax(0,1.6fr)_0.7fr_0.9fr_0.8fr_1fr] gap-2 rounded border border-border/40 px-2 py-1"
+                            >
+                              <span className="truncate font-medium" title={item.event}>{item.event}</span>
+                              <span className="text-muted-foreground">n={item.count}</span>
+                              <span className="text-muted-foreground">
+                                avg={item.timedCount > 0 ? Math.round(item.totalDuration / item.timedCount) : 0}ms
+                              </span>
+                              <span className="text-muted-foreground">slow={item.slowCount}</span>
+                              <span className="text-muted-foreground">err={item.errorCount}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="space-y-1 p-2 font-mono text-xs">
+                      {telemetryEntries.length === 0 ? (
+                        <div className="text-muted-foreground">{t('developer.telemetryEmpty')}</div>
+                      ) : (
+                        telemetryEntries
+                          .slice()
+                          .reverse()
+                          .map((entry) => (
+                            <div key={entry.id} className="rounded border border-border/40 bg-background/60 p-2">
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="font-semibold">{entry.event}</span>
+                                <span className="text-muted-foreground">{entry.ts}</span>
+                              </div>
+                              <pre className="mt-1 whitespace-pre-wrap text-[11px] text-muted-foreground">
+                                {JSON.stringify({ count: entry.count, ...entry.payload }, null, 2)}
+                              </pre>
+                            </div>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
       )}
 
       {/* About */}
-      <Card>
+      <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('about.title')}</CardTitle>
         </CardHeader>

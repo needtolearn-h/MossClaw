@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  English | <a href="README.zh-CN.md">简体中文</a>
+  English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a>
 </p>
 
 ---
@@ -144,7 +144,6 @@ pnpm run init
 # Start in development mode
 pnpm dev
 ```
-
 ### First Launch
 
 When you launch ClawX for the first time, the **Setup Wizard** will guide you through:
@@ -153,6 +152,9 @@ When you launch ClawX for the first time, the **Setup Wizard** will guide you th
 2. **AI Provider** – Enter your API keys for supported providers
 3. **Skill Bundles** – Select pre-configured skills for common use cases
 4. **Verification** – Test your configuration before entering the main interface
+
+> Note for Moonshot (Kimi): ClawX keeps Kimi web search enabled by default.  
+> When Moonshot is configured, ClawX also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
 
 ### Proxy Settings
 
@@ -172,7 +174,6 @@ Recommended local examples:
 ```text
 Proxy Server: http://127.0.0.1:7890
 ```
-
 Notes:
 
 - A bare `host:port` value is treated as HTTP.
@@ -184,10 +185,9 @@ Notes:
 
 ## Architecture
 
-ClawX employs a **dual-process architecture** that separates UI concerns from AI runtime operations:
+ClawX employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
+```┌─────────────────────────────────────────────────────────────────┐
 │                        ClawX Desktop App                         │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -198,18 +198,29 @@ ClawX employs a **dual-process architecture** that separates UI concerns from AI
 │  │  • Auto-update orchestration                                │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                    │
-│                              │ IPC                                │
+│                              │ IPC (authoritative control plane)  │
 │                              ▼                                    │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │              React Renderer Process                         │  │
 │  │  • Modern component-based UI (React 19)                     │  │
 │  │  • State management with Zustand                            │  │
-│  │  • Real-time WebSocket communication                        │  │
+│  │  • Unified host-api/api-client calls                        │  │
 │  │  • Rich Markdown rendering                                  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
-                               │ WebSocket (JSON-RPC)
+                               │ Main-owned transport strategy
+                               │ (WS first, HTTP then IPC fallback)
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                Host API & Main Process Proxies                  │
+│                                                                  │
+│  • hostapi:fetch (Main proxy, avoids CORS in dev/prod)          │
+│  • gateway:httpProxy (Renderer never calls Gateway HTTP direct)  │
+│  • Unified error mapping & retry/backoff                         │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               │ WS / HTTP / IPC fallback
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     OpenClaw Gateway                             │
@@ -220,13 +231,14 @@ ClawX employs a **dual-process architecture** that separates UI concerns from AI
 │  • Provider abstraction layer                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
-
 ### Design Principles
 
 - **Process Isolation**: The AI runtime operates in a separate process, ensuring UI responsiveness even during heavy computation
-- **Graceful Recovery**: Built-in reconnection logic with exponential backoff handles transient failures automatically
+- **Single Entry for Frontend Calls**: Renderer requests go through host-api/api-client; protocol details are hidden behind a stable interface
+- **Main-Process Transport Ownership**: Electron Main controls WS/HTTP usage and fallback to IPC for reliability
+- **Graceful Recovery**: Built-in reconnect, timeout, and backoff logic handles transient failures automatically
 - **Secure Storage**: API keys and sensitive data leverage the operating system's native secure storage mechanisms
-- **Hot Reload**: Development mode supports instant UI updates without restarting the gateway
+- **CORS-Safe by Design**: Local HTTP access is proxied by Main, preventing renderer-side CORS issues
 
 ---
 
@@ -255,60 +267,53 @@ Chain multiple skills together to create sophisticated automation pipelines. Pro
 
 ### Project Structure
 
+```ClawX/
+├── electron/                 # Electron Main Process
+│   ├── api/                 # Main-side API router and handlers
+│   │   └── routes/          # RPC/HTTP proxy route modules
+│   ├── services/            # Provider, secrets and runtime services
+│   │   ├── providers/       # Provider/account model sync logic
+│   │   └── secrets/         # OS keychain and secret storage
+│   ├── shared/              # Shared provider schemas/constants
+│   │   └── providers/
+│   ├── main/                # App entry, windows, IPC registration
+│   ├── gateway/             # OpenClaw Gateway process manager
+│   ├── preload/             # Secure IPC bridge
+│   └── utils/               # Utilities (storage, auth, paths)
+├── src/                      # React Renderer Process
+│   ├── lib/                 # Unified frontend API + error model
+│   ├── stores/              # Zustand stores (settings/chat/gateway)
+│   ├── components/          # Reusable UI components
+│   ├── pages/               # Setup/Dashboard/Chat/Channels/Skills/Cron/Settings
+│   ├── i18n/                # Localization resources
+│   └── types/               # TypeScript type definitions
+├── tests/
+│   └── unit/                # Vitest unit/integration-like tests
+├── resources/                # Static assets (icons/images)
+└── scripts/                  # Build and utility scripts
 ```
-ClawX/
-├── electron/              # Electron Main Process
-│   ├── main/             # Application entry, window management
-│   ├── gateway/          # OpenClaw Gateway process manager
-│   ├── preload/          # Secure IPC bridge scripts
-│   └── utils/            # Utilities (storage, auth, paths)
-├── src/                   # React Renderer Process
-│   ├── components/       # Reusable UI components
-│   │   ├── ui/          # Base components (shadcn/ui)
-│   │   ├── layout/      # Layout components (sidebar, header)
-│   │   └── common/      # Shared components
-│   ├── pages/           # Application pages
-│   │   ├── Setup/       # Initial setup wizard
-│   │   ├── Dashboard/   # Home dashboard
-│   │   ├── Chat/        # AI chat interface
-│   │   ├── Channels/    # Channel management
-│   │   ├── Skills/      # Skill browser & manager
-│   │   ├── Cron/        # Scheduled tasks
-│   │   └── Settings/    # Configuration panels
-│   ├── stores/          # Zustand state stores
-│   ├── lib/             # Frontend utilities
-│   └── types/           # TypeScript type definitions
-├── resources/            # Static assets (icons, images)
-├── scripts/              # Build & utility scripts
-└── tests/               # Test suites
-```
-
 ### Available Commands
 
 ```bash
 # Development
+pnpm run init             # Install dependencies + download uv
 pnpm dev                  # Start with hot reload
-pnpm dev:electron         # Launch Electron directly
 
 # Quality
 pnpm lint                 # Run ESLint
-pnpm lint:fix             # Auto-fix issues
 pnpm typecheck            # TypeScript validation
 
 # Testing
 pnpm test                 # Run unit tests
-pnpm test:watch           # Watch mode
-pnpm test:coverage        # Generate coverage report
-pnpm test:e2e             # Run Playwright E2E tests
 
 # Build & Package
-pnpm build                # Full production build
+pnpm run build:vite       # Build frontend only
+pnpm build                # Full production build (with packaging assets)
 pnpm package              # Package for current platform
 pnpm package:mac          # Package for macOS
 pnpm package:win          # Package for Windows
 pnpm package:linux        # Package for Linux
 ```
-
 ### Tech Stack
 
 | Layer | Technology |
@@ -364,6 +369,16 @@ Join our community to connect with other users, get support, and share your expe
 | Enterprise WeChat | Feishu Group | Discord |
 | :---: | :---: | :---: |
 | <img src="src/assets/community/wecom-qr.png" width="150" alt="WeChat QR Code" /> | <img src="src/assets/community/feishu-qr.png" width="150" alt="Feishu QR Code" /> | <img src="src/assets/community/20260212-185822.png" width="150" alt="Discord QR Code" /> |
+
+### ClawX Partner Program 🚀
+
+We're launching the ClawX Partner Program and looking for partners who can help introduce ClawX to more clients, especially those with custom AI agent or automation needs.
+
+Partners help connect us with potential users and projects, while the ClawX team provides full technical support, customization, and integration.
+
+If you work with clients interested in AI tools or automation, we'd love to collaborate.
+
+DM us or email [public@valuecell.ai](mailto:public@valuecell.ai) to learn more.
 
 ---
 

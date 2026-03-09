@@ -39,6 +39,7 @@ export interface PluginsConfig {
 export interface OpenClawConfig {
     channels?: Record<string, ChannelConfigData>;
     plugins?: PluginsConfig;
+    commands?: Record<string, unknown>;
     [key: string]: unknown;
 }
 
@@ -71,6 +72,14 @@ export async function writeOpenClawConfig(config: OpenClawConfig): Promise<void>
     await ensureConfigDir();
 
     try {
+        // Enable graceful in-process reload authorization for SIGUSR1 flows.
+        const commands =
+            config.commands && typeof config.commands === 'object'
+                ? { ...(config.commands as Record<string, unknown>) }
+                : {};
+        commands.restart = true;
+        config.commands = commands;
+
         await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
     } catch (error) {
         logger.error('Failed to write OpenClaw config', error);
@@ -86,21 +95,6 @@ export async function saveChannelConfig(
     config: ChannelConfigData
 ): Promise<void> {
     const currentConfig = await readOpenClawConfig();
-
-    // DingTalk is a channel plugin; make sure it's explicitly allowed.
-    // Newer OpenClaw versions may not load non-bundled plugins when allowlist is empty.
-    if (channelType === 'dingtalk') {
-        if (!currentConfig.plugins) {
-            currentConfig.plugins = {};
-        }
-        currentConfig.plugins.enabled = true;
-        const allow = Array.isArray(currentConfig.plugins.allow)
-            ? currentConfig.plugins.allow as string[]
-            : [];
-        if (!allow.includes('dingtalk')) {
-            currentConfig.plugins.allow = [...allow, 'dingtalk'];
-        }
-    }
 
     // DingTalk is a channel plugin; make sure it's explicitly allowed.
     // Newer OpenClaw versions may not load non-bundled plugins when allowlist is empty.

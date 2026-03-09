@@ -3,6 +3,7 @@
  * Manages window creation, system tray, and IPC handlers
  */
 import { app, BrowserWindow, nativeImage, session, shell } from 'electron';
+import type { Server } from 'node:http';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
 import { registerIpcHandlers } from './ipc-handlers';
@@ -20,6 +21,12 @@ import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
 import { getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
+import { startHostApiServer } from '../api/server';
+import { HostEventBus } from '../api/event-bus';
+import { deviceOAuthManager } from '../utils/device-oauth';
+import { browserOAuthManager } from '../utils/browser-oauth';
+import { whatsAppLoginManager } from '../utils/whatsapp-login';
+import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -37,10 +44,29 @@ import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
 // set `"disable-hardware-acceleration": false` in the app config (future).
 app.disableHardwareAcceleration();
 
+// On Linux, set CHROME_DESKTOP so Chromium can find the correct .desktop file.
+// On Wayland this maps the running window to clawx.desktop (→ icon + app grouping);
+// on X11 it supplements the StartupWMClass matching.
+// Must be called before app.whenReady() / before any window is created.
+if (process.platform === 'linux') {
+  app.setDesktopName('clawx.desktop');
+}
+
+// Prevent multiple instances of the app from running simultaneously.
+// Without this, two instances each spawn their own gateway process on the
+// same port, then each treats the other's gateway as "orphaned" and kills
+// it — creating an infinite kill/restart loop on Windows.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+}
+
 // Global references
 let mainWindow: BrowserWindow | null = null;
 const gatewayManager = new GatewayManager();
 const clawHubService = new ClawHubService();
+const hostEventBus = new HostEventBus();
+let hostApiServer: Server | null = null;
 
 /**
  * Resolve the icons directory path (works in both dev and packaged mode)
@@ -168,6 +194,13 @@ async function initialize(): Promise<void> {
   // Register IPC handlers
   registerIpcHandlers(gatewayManager, clawHubService, mainWindow);
 
+  hostApiServer = startHostApiServer({
+    gatewayManager,
+    clawHubService,
+    eventBus: hostEventBus,
+    mainWindow,
+  });
+
   // Register update handlers
   registerUpdateHandlers(appUpdater, mainWindow);
 
@@ -199,10 +232,82 @@ async function initialize(): Promise<void> {
     logger.warn('Failed to install built-in skills:', error);
   });
 
+  // Bridge gateway and host-side events before any auto-start logic runs, so
+  // renderer subscribers observe the full startup lifecycle.
+  gatewayManager.on('status', (status: { state: string }) => {
+    hostEventBus.emit('gateway:status', status);
+    if (status.state === 'running') {
+      void ensureClawXContext().catch((error) => {
+        logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
+      });
+    }
+  });
+
+  gatewayManager.on('error', (error) => {
+    hostEventBus.emit('gateway:error', { message: error.message });
+  });
+
+  gatewayManager.on('notification', (notification) => {
+    hostEventBus.emit('gateway:notification', notification);
+  });
+
+  gatewayManager.on('chat:message', (data) => {
+    hostEventBus.emit('gateway:chat-message', data);
+  });
+
+  gatewayManager.on('channel:status', (data) => {
+    hostEventBus.emit('gateway:channel-status', data);
+  });
+
+  gatewayManager.on('exit', (code) => {
+    hostEventBus.emit('gateway:exit', { code });
+  });
+
+  deviceOAuthManager.on('oauth:code', (payload) => {
+    hostEventBus.emit('oauth:code', payload);
+  });
+
+  deviceOAuthManager.on('oauth:start', (payload) => {
+    hostEventBus.emit('oauth:start', payload);
+  });
+
+  deviceOAuthManager.on('oauth:success', (payload) => {
+    hostEventBus.emit('oauth:success', { ...payload, success: true });
+  });
+
+  deviceOAuthManager.on('oauth:error', (error) => {
+    hostEventBus.emit('oauth:error', error);
+  });
+
+  browserOAuthManager.on('oauth:start', (payload) => {
+    hostEventBus.emit('oauth:start', payload);
+  });
+
+  browserOAuthManager.on('oauth:success', (payload) => {
+    hostEventBus.emit('oauth:success', { ...payload, success: true });
+  });
+
+  browserOAuthManager.on('oauth:error', (error) => {
+    hostEventBus.emit('oauth:error', error);
+  });
+
+  whatsAppLoginManager.on('qr', (data) => {
+    hostEventBus.emit('channel:whatsapp-qr', data);
+  });
+
+  whatsAppLoginManager.on('success', (data) => {
+    hostEventBus.emit('channel:whatsapp-success', data);
+  });
+
+  whatsAppLoginManager.on('error', (error) => {
+    hostEventBus.emit('channel:whatsapp-error', error);
+  });
+
   // Start Gateway automatically (this seeds missing bootstrap files with full templates)
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
   if (gatewayAutoStart) {
     try {
+      await syncAllProviderAuthToRuntime();
       logger.debug('Auto-starting Gateway...');
       await gatewayManager.start();
       logger.info('Gateway auto-start succeeded');
@@ -230,17 +335,16 @@ async function initialize(): Promise<void> {
   }).catch((error) => {
     logger.warn('CLI auto-install failed:', error);
   });
-
-  // Re-apply ClawX context after every gateway restart because the gateway
-  // may re-seed workspace files with clean templates (losing ClawX markers).
-  gatewayManager.on('status', (status: { state: string }) => {
-    if (status.state === 'running') {
-      void ensureClawXContext().catch((error) => {
-        logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
-      });
-    }
-  });
 }
+
+// When a second instance is launched, focus the existing window instead.
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
 
 // Application lifecycle
 app.whenReady().then(() => {
@@ -267,6 +371,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   setQuitting();
+  hostEventBus.closeAll();
+  hostApiServer?.close();
   // Fire-and-forget: do not await gatewayManager.stop() here.
   // Awaiting inside before-quit can stall Electron's quit sequence.
   void gatewayManager.stop().catch((err) => {

@@ -1,6 +1,7 @@
 {
     "sidebar": {
         "chat": "聊天",
+        "newChat": "新对话",
         "cronTasks": "定时任务",
         "skills": "技能",
         "channels": "频道",
@@ -27,7 +28,10 @@
         "back": "返回",
         "next": "下一步",
         "skip": "跳过",
-        "restart": "重启"
+        "restart": "重启",
+        "show": "显示",
+        "hide": "隐藏",
+        "clear": "清空"
     },
     "status": {
         "running": "运行中",

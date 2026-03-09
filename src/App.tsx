@@ -18,6 +18,7 @@ import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
+import { applyGatewayTransportPreference } from './lib/api-client';
 
 
 /**
@@ -148,6 +149,10 @@ function App() {
       root.classList.add(theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    applyGatewayTransportPreference();
+  }, []);
 
   return (
     <ErrorBoundary>

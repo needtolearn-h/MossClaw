@@ -3,6 +3,9 @@
  * Manages skill/plugin state
  */
 import { create } from 'zustand';
+import { hostApiFetch } from '@/lib/host-api';
+import { AppError, normalizeAppError } from '@/lib/error-model';
+import { useGatewayStore } from './gateway';
 import type { Skill, MarketplaceSkill } from '../types/skill';
 
 type GatewaySkillStatus = {
@@ -23,16 +26,31 @@ type GatewaySkillsStatusResult = {
   skills?: GatewaySkillStatus[];
 };
 
-type GatewayRpcResponse<T> = {
-  success: boolean;
-  result?: T;
-  error?: string;
-};
-
 type ClawHubListResult = {
   slug: string;
   version?: string;
 };
+
+function mapErrorCodeToSkillErrorKey(
+  code: AppError['code'],
+  operation: 'fetch' | 'search' | 'install',
+): string {
+  if (code === 'TIMEOUT') {
+    return operation === 'search'
+      ? 'searchTimeoutError'
+      : operation === 'install'
+        ? 'installTimeoutError'
+        : 'fetchTimeoutError';
+  }
+  if (code === 'RATE_LIMIT') {
+    return operation === 'search'
+      ? 'searchRateLimitError'
+      : operation === 'install'
+        ? 'installRateLimitError'
+        : 'fetchRateLimitError';
+  }
+  return 'rateLimitError';
+}
 
 interface SkillsState {
   skills: Skill[];
@@ -70,27 +88,20 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
     try {
       // 1. Fetch from Gateway (running skills)
-      const gatewayResult = await window.electron.ipcRenderer.invoke(
-        'gateway:rpc',
-        'skills.status'
-      ) as GatewayRpcResponse<GatewaySkillsStatusResult>;
+      const gatewayData = await useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
 
       // 2. Fetch from ClawHub (installed on disk)
-      const clawhubResult = await window.electron.ipcRenderer.invoke(
-        'clawhub:list'
-      ) as { success: boolean; results?: ClawHubListResult[]; error?: string };
+      const clawhubResult = await hostApiFetch<{ success: boolean; results?: ClawHubListResult[]; error?: string }>('/api/clawhub/list');
 
       // 3. Fetch configurations directly from Electron (since Gateway doesn't return them)
-      const configResult = await window.electron.ipcRenderer.invoke(
-        'skill:getAllConfigs'
-      ) as Record<string, { apiKey?: string; env?: Record<string, string> }>;
+      const configResult = await hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
 
       let combinedSkills: Skill[] = [];
       const currentSkills = get().skills;
 
       // Map gateway skills info
-      if (gatewayResult.success && gatewayResult.result?.skills) {
-        combinedSkills = gatewayResult.result.skills.map((s: GatewaySkillStatus) => {
+      if (gatewayData.skills) {
+        combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
           // Merge with direct config if available
           const directConfig = configResult[s.skillKey] || {};
 
@@ -142,33 +153,29 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       set({ skills: combinedSkills, loading: false });
     } catch (error) {
       console.error('Failed to fetch skills:', error);
-      let errorMsg = error instanceof Error ? error.message : String(error);
-      if (errorMsg.includes('Timeout')) {
-        errorMsg = 'timeoutError';
-      } else if (errorMsg.toLowerCase().includes('rate limit')) {
-        errorMsg = 'rateLimitError';
-      }
-      set({ loading: false, error: errorMsg });
+      const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
+      set({ loading: false, error: mapErrorCodeToSkillErrorKey(appError.code, 'fetch') });
     }
   },
 
   searchSkills: async (query: string) => {
     set({ searching: true, searchError: null });
     try {
-      const result = await window.electron.ipcRenderer.invoke('clawhub:search', { query }) as { success: boolean; results?: MarketplaceSkill[]; error?: string };
+      const result = await hostApiFetch<{ success: boolean; results?: MarketplaceSkill[]; error?: string }>('/api/clawhub/search', {
+        method: 'POST',
+        body: JSON.stringify({ query }),
+      });
       if (result.success) {
         set({ searchResults: result.results || [] });
       } else {
-        if (result.error?.includes('Timeout')) {
-          throw new Error('searchTimeoutError');
-        }
-        if (result.error?.toLowerCase().includes('rate limit')) {
-          throw new Error('searchRateLimitError');
-        }
-        throw new Error(result.error || 'Search failed');
+        throw normalizeAppError(new Error(result.error || 'Search failed'), {
+          module: 'skills',
+          operation: 'search',
+        });
       }
     } catch (error) {
-      set({ searchError: String(error) });
+      const appError = normalizeAppError(error, { module: 'skills', operation: 'search' });
+      set({ searchError: mapErrorCodeToSkillErrorKey(appError.code, 'search') });
     } finally {
       set({ searching: false });
     }
@@ -177,15 +184,16 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   installSkill: async (slug: string, version?: string) => {
     set((state) => ({ installing: { ...state.installing, [slug]: true } }));
     try {
-      const result = await window.electron.ipcRenderer.invoke('clawhub:install', { slug, version }) as { success: boolean; error?: string };
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/install', {
+        method: 'POST',
+        body: JSON.stringify({ slug, version }),
+      });
       if (!result.success) {
-        if (result.error?.includes('Timeout')) {
-          throw new Error('installTimeoutError');
-        }
-        if (result.error?.toLowerCase().includes('rate limit')) {
-          throw new Error('installRateLimitError');
-        }
-        throw new Error(result.error || 'Install failed');
+        const appError = normalizeAppError(new Error(result.error || 'Install failed'), {
+          module: 'skills',
+          operation: 'install',
+        });
+        throw new Error(mapErrorCodeToSkillErrorKey(appError.code, 'install'));
       }
       // Refresh skills after install
       await get().fetchSkills();
@@ -204,7 +212,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   uninstallSkill: async (slug: string) => {
     set((state) => ({ installing: { ...state.installing, [slug]: true } }));
     try {
-      const result = await window.electron.ipcRenderer.invoke('clawhub:uninstall', { slug }) as { success: boolean; error?: string };
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/uninstall', {
+        method: 'POST',
+        body: JSON.stringify({ slug }),
+      });
       if (!result.success) {
         throw new Error(result.error || 'Uninstall failed');
       }
@@ -226,17 +237,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     const { updateSkill } = get();
 
     try {
-      const result = await window.electron.ipcRenderer.invoke(
-        'gateway:rpc',
-        'skills.update',
-        { skillKey: skillId, enabled: true }
-      ) as GatewayRpcResponse<unknown>;
-
-      if (result.success) {
-        updateSkill(skillId, { enabled: true });
-      } else {
-        throw new Error(result.error || 'Failed to enable skill');
-      }
+      await useGatewayStore.getState().rpc('skills.update', { skillKey: skillId, enabled: true });
+      updateSkill(skillId, { enabled: true });
     } catch (error) {
       console.error('Failed to enable skill:', error);
       throw error;
@@ -252,17 +254,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
 
     try {
-      const result = await window.electron.ipcRenderer.invoke(
-        'gateway:rpc',
-        'skills.update',
-        { skillKey: skillId, enabled: false }
-      ) as GatewayRpcResponse<unknown>;
-
-      if (result.success) {
-        updateSkill(skillId, { enabled: false });
-      } else {
-        throw new Error(result.error || 'Failed to disable skill');
-      }
+      await useGatewayStore.getState().rpc('skills.update', { skillKey: skillId, enabled: false });
+      updateSkill(skillId, { enabled: false });
     } catch (error) {
       console.error('Failed to disable skill:', error);
       throw error;

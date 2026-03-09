@@ -21,6 +21,8 @@ const electronAPI = {
         'gateway:stop',
         'gateway:restart',
         'gateway:rpc',
+        'gateway:httpProxy',
+        'hostapi:fetch',
         'gateway:health',
         'gateway:getControlUiUrl',
         // OpenClaw
@@ -41,6 +43,7 @@ const electronAPI = {
         'app:platform',
         'app:quit',
         'app:relaunch',
+        'app:request',
         // Window controls
         'window:minimize',
         'window:maximize',
@@ -127,6 +130,8 @@ const electronAPI = {
         'media:saveImage',
         // Chat send with media (reads staged files in main process)
         'chat:sendWithMedia',
+        // Session management
+        'session:delete',
         // OpenClaw extras
         'openclaw:getDir',
         'openclaw:getConfigDir',

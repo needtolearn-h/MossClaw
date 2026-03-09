@@ -13,6 +13,19 @@
   "aiProviders": {
     "title": "AI Providers",
     "description": "Configure your AI model providers and API keys",
+    "overview": {
+      "title": "Provider Accounts",
+      "description": "A summary of the provider accounts and models currently configured.",
+      "noModelSelected": "No model selected",
+      "multiAccountReady": "Multi-account ready",
+      "singletonVendor": "Single-account vendor"
+    },
+    "authModes": {
+      "apiKey": "API Key",
+      "oauthDevice": "OAuth Device",
+      "oauthBrowser": "OAuth Browser",
+      "local": "Local"
+    },
     "sections": {
       "model": "Model Settings",
       "fallback": "Fallback Settings"
@@ -85,6 +98,7 @@
       "cancel": "Cancel",
       "codeCopied": "Code copied to clipboard",
       "authFailed": "Authentication Failed",
+      "browserFlowUnavailable": "Browser OAuth is not wired for this provider yet.",
       "tryAgain": "Try Again",
       "approveLogin": "Approve Login",
       "step1": "Copy the authorization code below.",
@@ -113,6 +127,8 @@
     "proxyHttpsServerHelp": "Advanced override for HTTPS requests. Leave blank to use Proxy Server.",
     "proxyAllServer": "ALL_PROXY / SOCKS",
     "proxyAllServerHelp": "Advanced fallback for SOCKS-capable clients and protocols such as Telegram. Leave blank to use Proxy Server.",
+    "showAdvancedProxy": "Show advanced proxy fields",
+    "hideAdvancedProxy": "Hide advanced proxy fields",
     "proxyBypass": "Bypass Rules",
     "proxyBypassHelp": "Semicolon, comma, or newline separated hosts that should connect directly.",
     "proxyRestartNote": "Saving reapplies Electron networking and restarts the Gateway immediately.",
@@ -153,6 +169,25 @@
   "advanced": {
     "title": "Advanced",
     "description": "Power-user options",
+    "transport": {
+      "label": "Gateway Transport Preference",
+      "desc": "Choose how renderer requests gateway RPC: WebSocket, HTTP proxy, or IPC fallback.",
+      "saved": "Gateway transport preference saved",
+      "options": {
+        "wsFirst": "WS First",
+        "httpFirst": "HTTP First",
+        "wsOnly": "WS Only",
+        "httpOnly": "HTTP Only",
+        "ipcOnly": "IPC Only"
+      },
+      "descriptions": {
+        "wsFirst": "WS -> HTTP -> IPC",
+        "httpFirst": "HTTP -> WS -> IPC",
+        "wsOnly": "WS -> IPC",
+        "httpOnly": "HTTP -> IPC",
+        "ipcOnly": "IPC only"
+      }
+    },
     "devMode": "Developer Mode",
     "devModeDesc": "Show developer tools and shortcuts"
   },
@@ -172,6 +207,19 @@
     "cliPowershell": "PowerShell command.",
     "cmdUnavailable": "Command unavailable",
     "cmdCopied": "CLI command copied",
+    "wsDiagnostic": "WS Diagnostic Mode",
+    "wsDiagnosticDesc": "Temporarily enable WS/HTTP fallback chain for gateway RPC debugging.",
+    "wsDiagnosticEnabled": "WS diagnostic mode enabled",
+    "wsDiagnosticDisabled": "WS diagnostic mode disabled",
+    "telemetryViewer": "Telemetry Viewer",
+    "telemetryViewerDesc": "Local-only UX/performance telemetry, latest 200 entries.",
+    "telemetryAggregated": "Top Events",
+    "telemetryTotal": "Total",
+    "telemetryErrors": "Errors",
+    "telemetrySlow": "Slow (>=800ms)",
+    "telemetryEmpty": "No telemetry yet",
+    "telemetryCopied": "Telemetry copied",
+    "telemetryCleared": "Telemetry cleared",
     "installCmd": "Install \"openclaw\" Command",
     "installCmdDesc": "Installs ~/.local/bin/openclaw (no admin required)",
     "installTitle": "Install OpenClaw Command",

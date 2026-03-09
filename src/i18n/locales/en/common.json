@@ -1,6 +1,7 @@
 {
     "sidebar": {
         "chat": "Chat",
+        "newChat": "New Chat",
         "cronTasks": "Cron Tasks",
         "skills": "Skills",
         "channels": "Channels",
@@ -27,7 +28,10 @@
         "back": "Back",
         "next": "Next",
         "skip": "Skip",
-        "restart": "Restart"
+        "restart": "Restart",
+        "show": "Show",
+        "hide": "Hide",
+        "clear": "Clear"
     },
     "status": {
         "running": "Running",

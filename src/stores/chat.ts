@@ -1,9 +1,11 @@
 /**
  * Chat State Store
  * Manages chat messages, sessions, streaming, and thinking state.
- * Communicates with OpenClaw Gateway via gateway:rpc IPC.
+ * Communicates with OpenClaw Gateway via renderer WebSocket RPC.
  */
 import { create } from 'zustand';
+import { hostApiFetch } from '@/lib/host-api';
+import { useGatewayStore } from './gateway';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -85,6 +87,10 @@ interface ChatState {
   // Sessions
   sessions: ChatSession[];
   currentSessionKey: string;
+  /** First user message text per session key, used as display label */
+  sessionLabels: Record<string, string>;
+  /** Last message timestamp (ms) per session key, used for sorting */
+  sessionLastActivity: Record<string, number>;
 
   // Thinking
   showThinking: boolean;
@@ -94,6 +100,8 @@ interface ChatState {
   loadSessions: () => Promise<void>;
   switchSession: (key: string) => void;
   newSession: () => void;
+  deleteSession: (key: string) => Promise<void>;
+  cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   sendMessage: (text: string, attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>) => Promise<void>;
   abortRun: () => Promise<void>;
@@ -590,10 +598,13 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   if (needPreview.length === 0) return false;
 
   try {
-    const thumbnails = await window.electron.ipcRenderer.invoke(
-      'media:getThumbnails',
-      needPreview,
-    ) as Record<string, { preview: string | null; fileSize: number }>;
+    const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number }>>(
+      '/api/files/thumbnails',
+      {
+        method: 'POST',
+        body: JSON.stringify({ paths: needPreview }),
+      },
+    );
 
     let updated = false;
     for (const msg of messages) {
@@ -912,6 +923,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sessions: [],
   currentSessionKey: DEFAULT_SESSION_KEY,
+  sessionLabels: {},
+  sessionLastActivity: {},
 
   showThinking: true,
   thinkingLevel: null,
@@ -920,14 +933,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadSessions: async () => {
     try {
-      const result = await window.electron.ipcRenderer.invoke(
-        'gateway:rpc',
-        'sessions.list',
-        { limit: 50 }
-      ) as { success: boolean; result?: Record<string, unknown>; error?: string };
-
-      if (result.success && result.result) {
-        const data = result.result;
+      const data = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {});
+      if (data) {
         const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
         const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => ({
           key: String(s.key || ''),
@@ -966,8 +973,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
         if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
-          // Current session not found at all — switch to the first available session
-          nextSessionKey = dedupedSessions[0].key;
+          // Current session not found in the backend list
+          const isNewEmptySession = get().messages.length === 0;
+          if (!isNewEmptySession) {
+            nextSessionKey = dedupedSessions[0].key;
+          }
         }
 
         const sessionsWithCurrent = !dedupedSessions.find((s) => s.key === nextSessionKey) && nextSessionKey
@@ -982,6 +992,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (currentSessionKey !== nextSessionKey) {
           get().loadHistory();
         }
+
+        // Background: fetch first user message for every non-main session to populate labels upfront.
+        // Uses a small limit so it's cheap; runs in parallel and doesn't block anything.
+        const sessionsToLabel = sessionsWithCurrent.filter((s) => !s.key.endsWith(':main'));
+        if (sessionsToLabel.length > 0) {
+          void Promise.all(
+            sessionsToLabel.map(async (session) => {
+              try {
+                const r = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+                  'chat.history',
+                  { sessionKey: session.key, limit: 1000 },
+                );
+                const msgs = Array.isArray(r.messages) ? r.messages as RawMessage[] : [];
+                const firstUser = msgs.find((m) => m.role === 'user');
+                const lastMsg = msgs[msgs.length - 1];
+                set((s) => {
+                  const next: Partial<typeof s> = {};
+                  if (firstUser) {
+                    const labelText = getMessageText(firstUser.content).trim();
+                    if (labelText) {
+                      const truncated = labelText.length > 50 ? `${labelText.slice(0, 50)}…` : labelText;
+                      next.sessionLabels = { ...s.sessionLabels, [session.key]: truncated };
+                    }
+                  }
+                  if (lastMsg?.timestamp) {
+                    next.sessionLastActivity = { ...s.sessionLastActivity, [session.key]: toMs(lastMsg.timestamp) };
+                  }
+                  return next;
+                });
+              } catch { /* ignore per-session errors */ }
+            }),
+          );
+        }
       }
     } catch (err) {
       console.warn('Failed to load sessions:', err);
@@ -991,7 +1034,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Switch session ──
 
   switchSession: (key: string) => {
-    set({
+    const { currentSessionKey, messages } = get();
+    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    set((s) => ({
       currentSessionKey: key,
       messages: [],
       streamingText: '',
@@ -1002,9 +1047,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingFinal: false,
       lastUserMessageAt: null,
       pendingToolImages: [],
-    });
-    // Load history for new session
+      ...(leavingEmpty ? {
+        sessions: s.sessions.filter((s) => s.key !== currentSessionKey),
+        sessionLabels: Object.fromEntries(
+          Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionLastActivity: Object.fromEntries(
+          Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+        ),
+      } : {}),
+    }));
     get().loadHistory();
+  },
+
+  // ── Delete session ──
+  //
+  // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
+  // RPC — confirmed by inspecting client.ts, protocol.ts and the full codebase.
+  // Deletion is therefore a local-only UI operation: the session is removed from
+  // the sidebar list and its labels/activity maps are cleared.  The underlying
+  // JSONL history file on disk is intentionally left intact, consistent with the
+  // newSession() design that avoids sessions.reset to preserve history.
+
+  deleteSession: async (key: string) => {
+    // Soft-delete the session's JSONL transcript on disk.
+    // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
+    // sessions.list and token-usage queries both skip it automatically.
+    try {
+      const result = await hostApiFetch<{
+        success: boolean;
+        error?: string;
+      }>('/api/sessions/delete', {
+        method: 'POST',
+        body: JSON.stringify({ sessionKey: key }),
+      });
+      if (!result.success) {
+        console.warn(`[deleteSession] IPC reported failure for ${key}:`, result.error);
+      }
+    } catch (err) {
+      console.warn(`[deleteSession] IPC call failed for ${key}:`, err);
+    }
+
+    const { currentSessionKey, sessions } = get();
+    const remaining = sessions.filter((s) => s.key !== key);
+
+    if (currentSessionKey === key) {
+      // Switched away from deleted session — pick the first remaining or create new
+      const next = remaining[0];
+      set((s) => ({
+        sessions: remaining,
+        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+        messages: [],
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        activeRunId: null,
+        error: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+        currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
+      }));
+      if (next) {
+        get().loadHistory();
+      }
+    } else {
+      set((s) => ({
+        sessions: remaining,
+        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+      }));
+    }
   },
 
   // ── New session ──
@@ -1014,12 +1128,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // NOTE: We intentionally do NOT call sessions.reset on the old session.
     // sessions.reset archives (renames) the session JSONL file, making old
     // conversation history inaccessible when the user switches back to it.
+    const { currentSessionKey, messages } = get();
+    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
     const prefix = getCanonicalPrefixFromSessions(get().sessions) ?? DEFAULT_CANONICAL_PREFIX;
     const newKey = `${prefix}:session-${Date.now()}`;
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
     set((s) => ({
       currentSessionKey: newKey,
-      sessions: [...s.sessions, newSessionEntry],
+      sessions: [
+        ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
+        newSessionEntry,
+      ],
+      sessionLabels: leavingEmpty
+        ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
+        : s.sessionLabels,
+      sessionLastActivity: leavingEmpty
+        ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
+        : s.sessionLastActivity,
       messages: [],
       streamingText: '',
       streamingMessage: null,
@@ -1032,6 +1157,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  // ── Cleanup empty session on navigate away ──
+
+  cleanupEmptySession: () => {
+    const { currentSessionKey, messages } = get();
+    // Only remove non-main sessions that were never used (no messages sent).
+    // This mirrors the "leavingEmpty" logic in switchSession so that creating
+    // a new session and immediately navigating away doesn't leave a ghost entry
+    // in the sidebar.
+    const isEmptyNonMain = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    if (!isEmptyNonMain) return;
+    set((s) => ({
+      sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
+      sessionLabels: Object.fromEntries(
+        Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+      ),
+      sessionLastActivity: Object.fromEntries(
+        Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+      ),
+    }));
+  },
+
   // ── Load chat history ──
 
   loadHistory: async (quiet = false) => {
@@ -1039,14 +1185,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!quiet) set({ loading: true, error: null });
 
     try {
-      const result = await window.electron.ipcRenderer.invoke(
-        'gateway:rpc',
+      const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
         'chat.history',
-        { sessionKey: currentSessionKey, limit: 200 }
-      ) as { success: boolean; result?: Record<string, unknown>; error?: string };
-
-      if (result.success && result.result) {
-        const data = result.result;
+        { sessionKey: currentSessionKey, limit: 200 },
+      );
+      if (data) {
         const rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
 
         // Before filtering: attach images/files from tool_result messages to the next assistant message
@@ -1078,6 +1221,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
 
         set({ messages: finalMessages, thinkingLevel, loading: false });
+
+        // Extract first user message text as a session label for display in the toolbar.
+        // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
+        // displayName (e.g. the configured agent name "ClawX") instead.
+        const isMainSession = currentSessionKey.endsWith(':main');
+        if (!isMainSession) {
+          const firstUserMsg = finalMessages.find((m) => m.role === 'user');
+          if (firstUserMsg) {
+            const labelText = getMessageText(firstUserMsg.content).trim();
+            if (labelText) {
+              const truncated = labelText.length > 50 ? `${labelText.slice(0, 50)}…` : labelText;
+              set((s) => ({
+                sessionLabels: { ...s.sessionLabels, [currentSessionKey]: truncated },
+              }));
+            }
+          }
+        }
+
+        // Record last activity time from the last message in history
+        const lastMsg = finalMessages[finalMessages.length - 1];
+        if (lastMsg?.timestamp) {
+          const lastAt = toMs(lastMsg.timestamp);
+          set((s) => ({
+            sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: lastAt },
+          }));
+        }
 
         // Async: load missing image previews from disk (updates in background)
         loadMissingPreviews(finalMessages).then((updated) => {
@@ -1170,6 +1339,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       lastUserMessageAt: nowMs,
     }));
 
+    // Update session label with first user message text as soon as it's sent
+    const { sessionLabels, messages } = get();
+    const isFirstMessage = !messages.slice(0, -1).some((m) => m.role === 'user');
+    if (!currentSessionKey.endsWith(':main') && isFirstMessage && !sessionLabels[currentSessionKey] && trimmed) {
+      const truncated = trimmed.length > 50 ? `${trimmed.slice(0, 50)}…` : trimmed;
+      set((s) => ({ sessionLabels: { ...s.sessionLabels, [currentSessionKey]: truncated } }));
+    }
+
+    // Mark this session as most recently active
+    set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
+
     // Start the history poll and safety timeout IMMEDIATELY (before the
     // RPC await) because the gateway's chat.send RPC may block until the
     // entire agentic conversation finishes — the poll must run in parallel.
@@ -1238,24 +1418,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       let result: { success: boolean; result?: { runId?: string }; error?: string };
 
+      // Longer timeout for chat sends to tolerate high-latency networks (avoids connect error)
+      const CHAT_SEND_TIMEOUT_MS = 120_000;
+
       if (hasMedia) {
-        result = await window.electron.ipcRenderer.invoke(
-          'chat:sendWithMedia',
+        result = await hostApiFetch<{ success: boolean; result?: { runId?: string }; error?: string }>(
+          '/api/chat/send-with-media',
           {
-            sessionKey: currentSessionKey,
-            message: trimmed || 'Process the attached file(s).',
-            deliver: false,
-            idempotencyKey,
-            media: attachments.map((a) => ({
-              filePath: a.stagedPath,
-              mimeType: a.mimeType,
-              fileName: a.fileName,
-            })),
+            method: 'POST',
+            body: JSON.stringify({
+              sessionKey: currentSessionKey,
+              message: trimmed || 'Process the attached file(s).',
+              deliver: false,
+              idempotencyKey,
+              media: attachments.map((a) => ({
+                filePath: a.stagedPath,
+                mimeType: a.mimeType,
+                fileName: a.fileName,
+              })),
+            }),
           },
-        ) as { success: boolean; result?: { runId?: string }; error?: string };
+        );
       } else {
-        result = await window.electron.ipcRenderer.invoke(
-          'gateway:rpc',
+        const rpcResult = await useGatewayStore.getState().rpc<{ runId?: string }>(
           'chat.send',
           {
             sessionKey: currentSessionKey,
@@ -1263,7 +1448,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             deliver: false,
             idempotencyKey,
           },
-        ) as { success: boolean; result?: { runId?: string }; error?: string };
+          CHAT_SEND_TIMEOUT_MS,
+        );
+        result = { success: true, result: rpcResult };
       }
 
       console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
@@ -1290,8 +1477,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ streamingTools: [] });
 
     try {
-      await window.electron.ipcRenderer.invoke(
-        'gateway:rpc',
+      await useGatewayStore.getState().rpc(
         'chat.abort',
         { sessionKey: currentSessionKey },
       );

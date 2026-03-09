@@ -1,13 +1,13 @@
 /**
  * Provider Types & UI Metadata — single source of truth for the frontend.
  *
- * NOTE: When adding a new provider type, also update
- * electron/utils/provider-registry.ts (env vars, models, configs).
+ * NOTE: Backend provider metadata is being refactored toward the new
+ * account-based registry, but the renderer still keeps a local compatibility
+ * layer so TypeScript project boundaries remain stable during the migration.
  */
 
 export const PROVIDER_TYPES = [
   'aihub-dev',
-  'aihub-prd',
   'openai',
   'google',
   'openrouter',
@@ -21,6 +21,20 @@ export const PROVIDER_TYPES = [
   'custom',
 ] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
+
+export const BUILTIN_PROVIDER_TYPES = [
+  'aihub-dev',
+  'openai',
+  'google',
+  'openrouter',
+  'ark',
+  'moonshot',
+  'siliconflow',
+  'minimax-portal',
+  'minimax-portal-cn',
+  'qwen-portal',
+  'ollama',
+] as const;
 
 export const OLLAMA_PLACEHOLDER_API_KEY = 'ollama-local';
 
@@ -47,25 +61,59 @@ export interface ProviderTypeInfo {
   name: string;
   icon: string;
   placeholder: string;
-  /** Model brand name for display (e.g. "Claude", "GPT") */
   model?: string;
   requiresApiKey: boolean;
-  /** Pre-filled base URL (for proxy/compatible providers like SiliconFlow) */
   defaultBaseUrl?: string;
-  /** Whether the user can edit the base URL in setup */
   showBaseUrl?: boolean;
-  /** Whether to show a Model ID input field (for providers where user picks the model) */
   showModelId?: boolean;
-  /** Default / example model ID placeholder */
+  showModelIdInDevModeOnly?: boolean;
   modelIdPlaceholder?: string;
-  /** Default model ID to pre-fill */
   defaultModelId?: string;
-  /** Whether this provider uses OAuth device flow instead of an API key */
   isOAuth?: boolean;
-  /** Whether this provider also accepts a direct API key (in addition to OAuth) */
   supportsApiKey?: boolean;
-  /** URL where users can apply for the API Key */
   apiKeyUrl?: string;
+}
+
+export type ProviderAuthMode =
+  | 'api_key'
+  | 'oauth_device'
+  | 'oauth_browser'
+  | 'local';
+
+export type ProviderVendorCategory =
+  | 'official'
+  | 'compatible'
+  | 'local'
+  | 'custom';
+
+export interface ProviderVendorInfo extends ProviderTypeInfo {
+  category: ProviderVendorCategory;
+  envVar?: string;
+  supportedAuthModes: ProviderAuthMode[];
+  defaultAuthMode: ProviderAuthMode;
+  supportsMultipleAccounts: boolean;
+}
+
+export interface ProviderAccount {
+  id: string;
+  vendorId: ProviderType;
+  label: string;
+  authMode: ProviderAuthMode;
+  baseUrl?: string;
+  apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  model?: string;
+  fallbackModels?: string[];
+  fallbackAccountIds?: string[];
+  enabled: boolean;
+  isDefault: boolean;
+  metadata?: {
+    region?: string;
+    email?: string;
+    resourceUrl?: string;
+    customModels?: string[];
+  };
+  createdAt: string;
+  updatedAt: string;
 }
 
 import { providerIcons } from '@/assets/providers';
@@ -94,6 +142,28 @@ export const SETUP_PROVIDERS = PROVIDER_TYPE_INFO;
 /** Get type info by provider type id */
 export function getProviderTypeInfo(type: ProviderType): ProviderTypeInfo | undefined {
   return PROVIDER_TYPE_INFO.find((t) => t.id === type);
+}
+
+export function shouldShowProviderModelId(
+  provider: Pick<ProviderTypeInfo, 'showModelId' | 'showModelIdInDevModeOnly'> | undefined,
+  devModeUnlocked: boolean
+): boolean {
+  if (!provider?.showModelId) return false;
+  if (provider.showModelIdInDevModeOnly && !devModeUnlocked) return false;
+  return true;
+}
+
+export function resolveProviderModelForSave(
+  provider: Pick<ProviderTypeInfo, 'defaultModelId' | 'showModelId' | 'showModelIdInDevModeOnly'> | undefined,
+  modelId: string,
+  devModeUnlocked: boolean
+): string | undefined {
+  if (!shouldShowProviderModelId(provider, devModeUnlocked)) {
+    return undefined;
+  }
+
+  const trimmedModelId = modelId.trim();
+  return trimmedModelId || provider?.defaultModelId || undefined;
 }
 
 /** Normalize provider API key before saving; Ollama uses a local placeholder when blank. */

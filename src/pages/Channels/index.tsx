@@ -2,7 +2,7 @@
  * Channels Page
  * Manage messaging channel connections with configuration UI
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus,
   Radio,
@@ -28,10 +28,14 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useChannelsStore } from '@/stores/channels';
 import { useGatewayStore } from '@/stores/gateway';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { hostApiFetch } from '@/lib/host-api';
+import { subscribeHostEvent } from '@/lib/host-events';
+import { invokeIpc } from '@/lib/api-client';
 import {
   CHANNEL_ICONS,
   CHANNEL_NAMES,
@@ -53,6 +57,7 @@ export function Channels() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
   const [configuredTypes, setConfiguredTypes] = useState<string[]>([]);
+  const [channelToDelete, setChannelToDelete] = useState<{ id: string } | null>(null);
 
   // Fetch channels on mount
   useEffect(() => {
@@ -62,10 +67,10 @@ export function Channels() {
   // Fetch configured channel types from config file
   const fetchConfiguredTypes = useCallback(async () => {
     try {
-      const result = await window.electron.ipcRenderer.invoke('channel:listConfigured') as {
+      const result = await hostApiFetch<{
         success: boolean;
         channels?: string[];
-      };
+      }>('/api/channels/configured');
       if (result.success && result.channels) {
         setConfiguredTypes(result.channels);
       }
@@ -80,7 +85,7 @@ export function Channels() {
   }, [fetchConfiguredTypes]);
 
   useEffect(() => {
-    const unsubscribe = window.electron.ipcRenderer.on('gateway:channel-status', () => {
+    const unsubscribe = subscribeHostEvent('gateway:channel-status', () => {
       fetchChannels();
       fetchConfiguredTypes();
     });
@@ -204,11 +209,7 @@ export function Channels() {
                 <ChannelCard
                   key={channel.id}
                   channel={channel}
-                  onDelete={() => {
-                    if (confirm(t('deleteConfirm'))) {
-                      deleteChannel(channel.id);
-                    }
-                  }}
+                  onDelete={() => setChannelToDelete({ id: channel.id })}
                 />
               ))}
             </div>
@@ -281,6 +282,22 @@ export function Channels() {
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={!!channelToDelete}
+        title={t('common.confirm', 'Confirm')}
+        message={t('deleteConfirm')}
+        confirmLabel={t('common.delete', 'Delete')}
+        cancelLabel={t('common.cancel', 'Cancel')}
+        variant="destructive"
+        onConfirm={async () => {
+          if (channelToDelete) {
+            await deleteChannel(channelToDelete.id);
+            setChannelToDelete(null);
+          }
+        }}
+        onCancel={() => setChannelToDelete(null)}
+      />
     </div>
   );
 }
@@ -350,6 +367,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const [validating, setValidating] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [isExistingConfig, setIsExistingConfig] = useState(false);
+  const firstInputRef = useRef<HTMLInputElement>(null);
   const [validationResult, setValidationResult] = useState<{
     valid: boolean;
     errors: string[];
@@ -367,7 +385,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       setChannelName('');
       setIsExistingConfig(false);
       // Ensure we clean up any pending QR session if switching away
-      window.electron.ipcRenderer.invoke('channel:cancelWhatsAppQr').catch(() => { });
+      hostApiFetch('/api/channels/whatsapp/cancel', { method: 'POST' }).catch(() => { });
       return;
     }
 
@@ -376,7 +394,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
 
     (async () => {
       try {
-        const result = await window.electron.ipcRenderer.invoke(
+        const result = await invokeIpc(
           'channel:getFormValues',
           selectedType
         ) as { success: boolean; values?: Record<string, string> };
@@ -403,6 +421,13 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     return () => { cancelled = true; };
   }, [selectedType]);
 
+  // Focus first input when form is ready (avoids Windows focus loss after native dialogs)
+  useEffect(() => {
+    if (selectedType && !loadingConfig && firstInputRef.current) {
+      firstInputRef.current.focus();
+    }
+  }, [selectedType, loadingConfig]);
+
   // Listen for WhatsApp QR events
   useEffect(() => {
     if (selectedType !== 'whatsapp') return;
@@ -417,11 +442,10 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       toast.success(t('toast.whatsappConnected'));
       const accountId = data?.accountId || channelName.trim() || 'default';
       try {
-        const saveResult = await window.electron.ipcRenderer.invoke(
-          'channel:saveConfig',
-          'whatsapp',
-          { enabled: true }
-        ) as { success?: boolean; error?: string };
+        const saveResult = await hostApiFetch<{ success?: boolean; error?: string }>('/api/channels/config', {
+          method: 'POST',
+          body: JSON.stringify({ channelType: 'whatsapp', config: { enabled: true } }),
+        });
         if (!saveResult?.success) {
           console.error('Failed to save WhatsApp config:', saveResult?.error);
         } else {
@@ -436,7 +460,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         name: channelName || 'WhatsApp',
       }).then(() => {
         // Restart gateway to pick up the new session
-        window.electron.ipcRenderer.invoke('gateway:restart').catch(console.error);
+        useGatewayStore.getState().restart().catch(console.error);
         onChannelAdded();
       });
     };
@@ -449,16 +473,16 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       setConnecting(false);
     };
 
-    const removeQrListener = window.electron.ipcRenderer.on('channel:whatsapp-qr', onQr);
-    const removeSuccessListener = window.electron.ipcRenderer.on('channel:whatsapp-success', onSuccess);
-    const removeErrorListener = window.electron.ipcRenderer.on('channel:whatsapp-error', onError);
+    const removeQrListener = subscribeHostEvent('channel:whatsapp-qr', onQr);
+    const removeSuccessListener = subscribeHostEvent('channel:whatsapp-success', onSuccess);
+    const removeErrorListener = subscribeHostEvent('channel:whatsapp-error', onError);
 
     return () => {
       if (typeof removeQrListener === 'function') removeQrListener();
       if (typeof removeSuccessListener === 'function') removeSuccessListener();
       if (typeof removeErrorListener === 'function') removeErrorListener();
       // Cancel when unmounting or switching types
-      window.electron.ipcRenderer.invoke('channel:cancelWhatsAppQr').catch(() => { });
+      hostApiFetch('/api/channels/whatsapp/cancel', { method: 'POST' }).catch(() => { });
     };
   }, [selectedType, addChannel, channelName, onChannelAdded, t]);
 
@@ -469,17 +493,16 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     setValidationResult(null);
 
     try {
-      const result = await window.electron.ipcRenderer.invoke(
-        'channel:validateCredentials',
-        selectedType,
-        configValues
-      ) as {
+      const result = await hostApiFetch<{
         success: boolean;
         valid?: boolean;
         errors?: string[];
         warnings?: string[];
         details?: Record<string, string>;
-      };
+      }>('/api/channels/credentials/validate', {
+        method: 'POST',
+        body: JSON.stringify({ channelType: selectedType, config: configValues }),
+      });
 
       const warnings = result.warnings || [];
       if (result.valid && result.details) {
@@ -516,24 +539,26 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       // For QR-based channels, request QR code
       if (meta.connectionType === 'qr') {
         const accountId = channelName.trim() || 'default';
-        await window.electron.ipcRenderer.invoke('channel:requestWhatsAppQr', accountId);
+        await hostApiFetch('/api/channels/whatsapp/start', {
+          method: 'POST',
+          body: JSON.stringify({ accountId }),
+        });
         // The QR code will be set via event listener
         return;
       }
 
       // Step 1: Validate credentials against the actual service API
       if (meta.connectionType === 'token') {
-        const validationResponse = await window.electron.ipcRenderer.invoke(
-          'channel:validateCredentials',
-          selectedType,
-          configValues
-        ) as {
+        const validationResponse = await hostApiFetch<{
           success: boolean;
           valid?: boolean;
           errors?: string[];
           warnings?: string[];
           details?: Record<string, string>;
-        };
+        }>('/api/channels/credentials/validate', {
+          method: 'POST',
+          body: JSON.stringify({ channelType: selectedType, config: configValues }),
+        });
 
         if (!validationResponse.valid) {
           setValidationResult({
@@ -570,12 +595,15 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
 
       // Step 2: Save channel configuration via IPC
       const config: Record<string, unknown> = { ...configValues };
-      const saveResult = await window.electron.ipcRenderer.invoke('channel:saveConfig', selectedType, config) as {
+      const saveResult = await hostApiFetch<{
         success?: boolean;
         error?: string;
         warning?: string;
         pluginInstalled?: boolean;
-      };
+      }>('/api/channels/config', {
+        method: 'POST',
+        body: JSON.stringify({ channelType: selectedType, config }),
+      });
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Failed to save channel config');
       }
@@ -753,6 +781,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
               <div className="space-y-2">
                 <Label htmlFor="name">{t('dialog.channelName')}</Label>
                 <Input
+                  ref={firstInputRef}
                   id="name"
                   placeholder={t('dialog.channelNamePlaceholder', { name: meta?.name })}
                   value={channelName}
