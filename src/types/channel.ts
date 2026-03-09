@@ -9,6 +9,7 @@
 export type ChannelType =
   | 'whatsapp'
   | 'dingtalk'
+  | 'wecom'
   | 'telegram'
   | 'discord'
   | 'signal'
@@ -80,6 +81,7 @@ export interface ChannelMeta {
 export const CHANNEL_ICONS: Record<ChannelType, string> = {
   whatsapp: '📱',
   dingtalk: '💬',
+  wecom: '💼',
   telegram: '✈️',
   discord: '🎮',
   signal: '🔒',
@@ -98,6 +100,7 @@ export const CHANNEL_ICONS: Record<ChannelType, string> = {
 export const CHANNEL_NAMES: Record<ChannelType, string> = {
   whatsapp: 'WhatsApp',
   dingtalk: 'DingTalk',
+  wecom: 'WeCom',
   telegram: 'Telegram',
   discord: 'Discord',
   signal: 'Signal',
@@ -163,6 +166,36 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
       'channels:meta.dingtalk.instructions.1',
       'channels:meta.dingtalk.instructions.2',
       'channels:meta.dingtalk.instructions.3',
+    ],
+    isPlugin: true,
+  },
+  wecom: {
+    id: 'wecom',
+    name: 'WeCom',
+    icon: '💼',
+    description: 'channels:meta.wecom.description',
+    connectionType: 'token',
+    docsUrl: 'channels:meta.wecom.docsUrl',
+    configFields: [
+      {
+        key: 'botId',
+        label: 'channels:meta.wecom.fields.botId.label',
+        type: 'text',
+        placeholder: 'channels:meta.wecom.fields.botId.placeholder',
+        required: true,
+      },
+      {
+        key: 'secret',
+        label: 'channels:meta.wecom.fields.secret.label',
+        type: 'password',
+        placeholder: 'channels:meta.wecom.fields.secret.placeholder',
+        required: true,
+      },
+    ],
+    instructions: [
+      'channels:meta.wecom.instructions.0',
+      'channels:meta.wecom.instructions.1',
+      'channels:meta.wecom.instructions.2',
     ],
     isPlugin: true,
   },
@@ -496,7 +529,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
  * Get primary supported channels (non-plugin, commonly used)
  */
 export function getPrimaryChannels(): ChannelType[] {
-  return ['telegram', 'discord', 'whatsapp', 'dingtalk', 'feishu'];
+  return ['telegram', 'discord', 'whatsapp', 'dingtalk', 'wecom', 'feishu'];
 }
 
 /**

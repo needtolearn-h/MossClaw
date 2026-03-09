@@ -16,7 +16,7 @@ const OPENCLAW_DIR = join(homedir(), '.openclaw');
 const CONFIG_FILE = join(OPENCLAW_DIR, 'openclaw.json');
 
 // Channels that are managed as plugins (config goes under plugins.entries, not channels)
-const PLUGIN_CHANNELS = ['whatsapp'];
+const PLUGIN_CHANNELS = ['whatsapp', 'wecom'];
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -102,9 +102,8 @@ export async function saveChannelConfig(
         }
     }
 
-    // DingTalk is a channel plugin; make sure it's explicitly allowed.
-    // Newer OpenClaw versions may not load non-bundled plugins when allowlist is empty.
-    if (channelType === 'dingtalk') {
+    // WeCom is a channel plugin; make sure it's explicitly allowed.
+    if (channelType === 'wecom') {
         if (!currentConfig.plugins) {
             currentConfig.plugins = {};
         }
@@ -112,8 +111,8 @@ export async function saveChannelConfig(
         const allow = Array.isArray(currentConfig.plugins.allow)
             ? currentConfig.plugins.allow as string[]
             : [];
-        if (!allow.includes('dingtalk')) {
-            currentConfig.plugins.allow = [...allow, 'dingtalk'];
+        if (!allow.includes('wecom')) {
+            currentConfig.plugins.allow = [...allow, 'wecom'];
         }
     }
 

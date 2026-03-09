@@ -140,6 +140,26 @@
                 "必要に応じて Robot Code / Corp ID / Agent ID を入力します"
             ]
         },
+        "wecom": {
+            "description": "OpenClaw のチャンネルプラグイン経由で WeCom に接続します",
+            "docsUrl": "https://github.com/wecom/openclaw-plugin-wecom",
+            "fields": {
+                "botId": {
+                    "label": "Bot ID",
+                    "placeholder": "WeCom Bot ID"
+                },
+                "secret": {
+                    "label": "Secret",
+                    "placeholder": "WeCom アプリシークレット"
+                }
+            },
+            "instructions": [
+                "まず OpenClaw に wecom プラグインをインストールして有効化します",
+                "WeCom 管理コンソールでアプリを作成し Bot ID を取得します",
+                "Bot ID と Secret を入力します（必須）",
+                "設定を保存して接続します"
+            ]
+        },
         "signal": {
             "description": "signal-cli を使用して Signal に接続します",
             "fields": {

@@ -143,6 +143,26 @@
                 "Fill in Robot Code / Corp ID / Agent ID if your setup requires them"
             ]
         },
+        "wecom": {
+            "description": "Connect WeCom via OpenClaw channel plugin",
+            "docsUrl": "https://github.com/wecom/openclaw-plugin-wecom",
+            "fields": {
+                "botId": {
+                    "label": "Bot ID",
+                    "placeholder": "Your WeCom Bot ID"
+                },
+                "secret": {
+                    "label": "Secret",
+                    "placeholder": "Your WeCom app secret"
+                }
+            },
+            "instructions": [
+                "Install and enable the wecom plugin in OpenClaw",
+                "Create an app in WeCom admin console and get Bot ID",
+                "Fill in Bot ID and Secret (required)",
+                "Save configuration and connect"
+            ]
+        },
         "signal": {
             "description": "Connect Signal using signal-cli",
             "docsUrl": "https://docs.openclaw.ai/channels/signal",

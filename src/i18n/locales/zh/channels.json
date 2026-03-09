@@ -143,6 +143,26 @@
                 "根据你的应用配置按需填写 Robot Code / Corp ID / Agent ID"
             ]
         },
+        "wecom": {
+            "description": "通过 OpenClaw 渠道插件连接企业微信",
+            "docsUrl": "https://github.com/wecom/openclaw-plugin-wecom",
+            "fields": {
+                "botId": {
+                    "label": "Bot ID",
+                    "placeholder": "企业微信机器人 ID"
+                },
+                "secret": {
+                    "label": "Secret",
+                    "placeholder": "企业微信应用密钥"
+                }
+            },
+            "instructions": [
+                "先在 OpenClaw 安装并启用 wecom 插件",
+                "在企业微信管理后台创建应用并获取 Bot ID",
+                "填写 Bot ID 和 Secret（必填）",
+                "保存配置并连接"
+            ]
+        },
         "signal": {
             "description": "使用 signal-cli 连接 Signal",
             "docsUrl": "https://docs.openclaw.ai/zh-CN/channels/signal",

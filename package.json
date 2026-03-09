@@ -62,6 +62,7 @@
         "@radix-ui/react-toast": "^1.2.15",
         "@radix-ui/react-tooltip": "^1.2.8",
         "@soimy/dingtalk": "^3.1.4",
+        "@wecom/wecom-openclaw-plugin": "^1.0.0",
         "@testing-library/jest-dom": "^6.9.1",
         "@testing-library/react": "^16.3.2",
         "@types/node": "^25.3.0",
