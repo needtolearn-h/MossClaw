@@ -1,4 +1,3 @@
-import anthropic from './anthropic.svg';
 import openai from './openai.svg';
 import google from './google.svg';
 import openrouter from './openrouter.svg';
