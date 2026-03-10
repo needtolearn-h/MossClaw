@@ -171,7 +171,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   },
   wecom: {
     id: 'wecom',
-    name: 'WeCom',
+    name: '企业微信',
     icon: '💼',
     description: 'channels:meta.wecom.description',
     connectionType: 'token',
@@ -529,7 +529,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
  * Get primary supported channels (non-plugin, commonly used)
  */
 export function getPrimaryChannels(): ChannelType[] {
-  return ['whatsapp', 'dingtalk', 'feishu', 'wecom'];
+  return ['wecom', 'whatsapp', 'dingtalk', 'feishu'];
 }
 
 /**

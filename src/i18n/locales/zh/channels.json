@@ -187,7 +187,7 @@
         },
         "wecom": {
             "description": "通过插件连接企业微信机器人",
-            "docsUrl": "https://developer.work.weixin.qq.com/document/path/90000/90136/91770",
+            "docsUrl": "https://doc.web.guosen.com.cn/innerdocReader/doc/152600908214558721",
             "fields": {
                 "botId": {
                     "label": "机器人 Bot ID",
