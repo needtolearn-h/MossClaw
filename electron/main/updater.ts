@@ -14,7 +14,8 @@ import { setQuitting } from './app-state';
 
 /** Base CDN URL (without trailing channel path) */
 // const OSS_BASE_URL = 'https://oss.intelli-spectrum.com';
-const OSS_BASE_URL = 'http://10.118.11.23:5000';
+// const OSS_BASE_URL = 'http://10.118.11.23:5000';
+const OSS_BASE_URL = 'https://ai.web.guosen.com.cn/claw/release';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
