@@ -8,6 +8,7 @@
 
 export const PROVIDER_TYPES = [
   'aihub-dev',
+  'aihub-prd',
   'openai',
   'google',
   'openrouter',
@@ -24,6 +25,7 @@ export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 export const BUILTIN_PROVIDER_TYPES = [
   'aihub-dev',
+  'aihub-prd',
   'openai',
   'google',
   'openrouter',
@@ -120,7 +122,7 @@ import { providerIcons } from '@/assets/providers';
 
 /** All supported provider types with UI metadata */
 export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
-  { id: 'aihub-dev', name: '国信AIHUB(办公网)', icon: 'aihub', placeholder: 'API key...', model: 'Kimi-K2.5', requiresApiKey: true, showBaseUrl: true, defaultBaseUrl: 'http://10.118.10.111:80/s-AIGCLLMP-0012/v1', defaultModelId: 'kimi2-5' },
+  { id: 'aihub-dev', name: '国信AIHUB(办公网)', icon: 'aihub', placeholder: 'API key...', model: 'Kimi-K2.5', requiresApiKey: true, showBaseUrl: true, defaultBaseUrl: 'http://10.118.10.111:80/s-AIGCLLMP-0012/v1', defaultModelId: 'kimi-k2.5' },
   { id: 'aihub-prd', name: '国信AIHUB(生产网)', icon: 'aihub', placeholder: 'API key...', model: 'DeepSeek-V3.2', requiresApiKey: true, showBaseUrl: true, defaultBaseUrl: 'http://10.66.27.217:80/s-AIGCLLMP-0012/v1', defaultModelId: 'DeepSeek-v3.2' },
   { id: 'qwen-portal', name: 'Qwen', icon: '☁️', placeholder: 'sk-...', model: 'Qwen', requiresApiKey: false, isOAuth: true, defaultModelId: 'coder-model' },
   { id: 'custom', name: 'Custom', icon: '⚙️', placeholder: 'API key...', requiresApiKey: true, showBaseUrl: true, showModelId: true, modelIdPlaceholder: 'your-provider/model-id' },
