@@ -1,6 +1,6 @@
 {
     "name": "clawx",
-    "version": "0.2.0-beta.3",
+    "version": "0.2.0-beta.4",
     "pnpm": {
         "onlyBuiltDependencies": [
             "@discordjs/opus",
@@ -24,9 +24,10 @@
     "scripts": {
         "init": "pnpm install && pnpm run uv:download",
         "dev": "vite",
-        "build": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && electron-builder",
+        "build": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
         "build:vite": "vite build",
         "bundle:openclaw-plugins": "zx scripts/bundle-openclaw-plugins.mjs",
+        "bundle:preinstalled-skills": "zx scripts/bundle-preinstalled-skills.mjs",
         "lint": "eslint . --fix",
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
@@ -36,11 +37,11 @@
         "uv:download:linux": "zx scripts/download-bundled-uv.mjs --platform=linux",
         "uv:download:all": "zx scripts/download-bundled-uv.mjs --all",
         "icons": "zx scripts/generate-icons.mjs",
-        "package": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && electron-builder",
-        "package:mac": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && electron-builder --mac",
-        "package:win": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && electron-builder --win",
-        "package:linux": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && electron-builder --linux",
-        "release": "pnpm run uv:download && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && electron-builder --publish always",
+        "package": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
+        "package:mac": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --mac",
+        "package:win": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --win",
+        "package:linux": "vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --linux",
+        "release": "pnpm run uv:download && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --publish always",
         "version:patch": "pnpm version patch",
         "version:minor": "pnpm version minor",
         "version:major": "pnpm version major",
@@ -58,6 +59,7 @@
     },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
+        "@larksuite/openclaw-lark": "2026.3.10",
         "@radix-ui/react-dialog": "^1.1.15",
         "@radix-ui/react-dropdown-menu": "^2.1.16",
         "@radix-ui/react-label": "^2.1.8",
