@@ -1,6 +1,6 @@
 {
   "title": "Settings",
-  "subtitle": "Configure your MossCLaw experience",
+  "subtitle": "Configure your MossClaw experience",
   "appearance": {
     "title": "Appearance",
     "description": "Customize the look and feel",
@@ -35,7 +35,7 @@
     "notRequired": "Not required",
     "empty": {
       "title": "No providers configured",
-      "desc": "Add an AI provider to start using MossCLaw",
+      "desc": "Add an AI provider to start using MossClaw",
       "cta": "Add Your First Provider"
     },
     "dialog": {
@@ -122,7 +122,7 @@
     "appLogs": "Application Logs",
     "openFolder": "Open Folder",
     "autoStart": "Auto-start Gateway",
-    "autoStartDesc": "Start Gateway when MossCLaw launches",
+    "autoStartDesc": "Start Gateway when MossClaw launches",
     "proxyTitle": "Proxy",
     "proxyDesc": "Route Electron and Gateway traffic through your local proxy client.",
     "proxyServer": "Proxy Server",
@@ -143,7 +143,7 @@
   },
   "updates": {
     "title": "Updates",
-    "description": "Keep MossCLaw up to date",
+    "description": "Keep MossClaw up to date",
     "autoCheck": "Auto-check for updates",
     "autoCheckDesc": "Check for updates on startup",
     "autoDownload": "Auto-update",
@@ -197,7 +197,7 @@
     "devMode": "Developer Mode",
     "devModeDesc": "Show developer tools and shortcuts",
     "telemetry": "Anonymous Usage Data",
-    "telemetryDesc": "Allow providing anonymous basic usage data to improve ClawX"
+    "telemetryDesc": "Allow providing anonymous basic usage data to improve MossClaw"
   },
   "developer": {
     "title": "Developer",
@@ -236,7 +236,7 @@
   },
   "about": {
     "title": "About",
-    "appName": "MossCLaw",
+    "appName": "MossClaw",
     "tagline": "Graphical AI Assistant",
     "basedOn": "Based on OpenClaw",
     "version": "Version {{version}}",
