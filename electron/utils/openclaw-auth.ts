@@ -1,6 +1,6 @@
 /**
  * OpenClaw Auth Profiles Utility
- * Writes API keys to ~/.openclaw/agents/main/agent/auth-profiles.json
+ * Writes API keys to configured OpenClaw agent auth-profiles.json files
  * so the OpenClaw Gateway can load them for AI provider calls.
  *
  * All file I/O is asynchronous (fs/promises) to avoid blocking the
@@ -8,10 +8,11 @@
  * equivalents could stall for 500 ms – 2 s+ per call, causing "Not
  * Responding" hangs.
  */
-import { access, mkdir, readFile, writeFile, readdir } from 'fs/promises';
-import { constants, Dirent } from 'fs';
+import { access, mkdir, readFile, writeFile } from 'fs/promises';
+import { constants } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { listConfiguredAgentIds } from './agent-config';
 import {
   getProviderEnvVar,
   getProviderDefaultModel,
@@ -120,14 +121,7 @@ async function discoverAgentIds(): Promise<string[]> {
   const agentsDir = join(homedir(), '.openclaw', 'agents');
   try {
     if (!(await fileExists(agentsDir))) return ['main'];
-    const entries: Dirent[] = await readdir(agentsDir, { withFileTypes: true });
-    const ids: string[] = [];
-    for (const d of entries) {
-      if (d.isDirectory() && await fileExists(join(agentsDir, d.name, 'agent'))) {
-        ids.push(d.name);
-      }
-    }
-    return ids.length > 0 ? ids : ['main'];
+    return await listConfiguredAgentIds();
   } catch {
     return ['main'];
   }
@@ -136,12 +130,37 @@ async function discoverAgentIds(): Promise<string[]> {
 // ── OpenClaw Config Helpers ──────────────────────────────────────
 
 const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
+const VALID_COMPACTION_MODES = new Set(['default', 'safeguard']);
 
 async function readOpenClawJson(): Promise<Record<string, unknown>> {
   return (await readJsonFile<Record<string, unknown>>(OPENCLAW_CONFIG_PATH)) ?? {};
 }
 
+function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>): void {
+  const agents = (config.agents && typeof config.agents === 'object'
+    ? config.agents as Record<string, unknown>
+    : null);
+  if (!agents) return;
+
+  const defaults = (agents.defaults && typeof agents.defaults === 'object'
+    ? agents.defaults as Record<string, unknown>
+    : null);
+  if (!defaults) return;
+
+  const compaction = (defaults.compaction && typeof defaults.compaction === 'object'
+    ? defaults.compaction as Record<string, unknown>
+    : null);
+  if (!compaction) return;
+
+  const mode = compaction.mode;
+  if (typeof mode === 'string' && mode.length > 0 && !VALID_COMPACTION_MODES.has(mode)) {
+    compaction.mode = 'default';
+  }
+}
+
 async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
+  normalizeAgentsDefaultsCompactionMode(config);
+
   // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
   const commands = (
     config.commands && typeof config.commands === 'object'
@@ -882,6 +901,46 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     }
   }
 
+  // ── plugins section ──────────────────────────────────────────────
+  // Remove absolute paths in plugins that no longer exist or are bundled (preventing hardlink validation errors)
+  const plugins = config.plugins;
+  if (plugins) {
+    if (Array.isArray(plugins)) {
+      const validPlugins: unknown[] = [];
+      for (const p of plugins) {
+        if (typeof p === 'string' && p.startsWith('/')) {
+          if (p.includes('node_modules/openclaw/extensions') || !(await fileExists(p))) {
+            console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
+            modified = true;
+          } else {
+            validPlugins.push(p);
+          }
+        } else {
+          validPlugins.push(p);
+        }
+      }
+      if (modified) config.plugins = validPlugins;
+    } else if (typeof plugins === 'object') {
+      const pluginsObj = plugins as Record<string, unknown>;
+      if (Array.isArray(pluginsObj.load)) {
+        const validLoad: unknown[] = [];
+        for (const p of pluginsObj.load) {
+          if (typeof p === 'string' && p.startsWith('/')) {
+            if (p.includes('node_modules/openclaw/extensions') || !(await fileExists(p))) {
+              console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
+              modified = true;
+            } else {
+              validLoad.push(p);
+            }
+          } else {
+            validLoad.push(p);
+          }
+        }
+        if (modified) pluginsObj.load = validLoad;
+      }
+    }
+  }
+
   // ── commands section ───────────────────────────────────────────
   // Required for SIGUSR1 in-process reload authorization.
   const commands = (
@@ -916,6 +975,30 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       config.tools = tools;
       modified = true;
     }
+  }
+
+  // ── tools.profile & sessions.visibility ───────────────────────
+  // OpenClaw 3.8+ requires tools.profile = 'full' and tools.sessions.visibility = 'all'
+  // for ClawX to properly integrate with its updated tool system.
+  const toolsConfig = (config.tools as Record<string, unknown> | undefined) || {};
+  let toolsModified = false;
+
+  if (toolsConfig.profile !== 'full') {
+    toolsConfig.profile = 'full';
+    toolsModified = true;
+  }
+
+  const sessions = (toolsConfig.sessions as Record<string, unknown> | undefined) || {};
+  if (sessions.visibility !== 'all') {
+    sessions.visibility = 'all';
+    toolsConfig.sessions = sessions;
+    toolsModified = true;
+  }
+
+  if (toolsModified) {
+    config.tools = toolsConfig;
+    modified = true;
+    console.log('[sanitize] Enforced tools.profile="full" and tools.sessions.visibility="all" for OpenClaw 3.8+');
   }
 
   if (modified) {

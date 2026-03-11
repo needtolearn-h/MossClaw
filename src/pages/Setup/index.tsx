@@ -29,6 +29,8 @@ import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
+import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { toast } from 'sonner';
 import { invokeIpc } from '@/lib/api-client';
 import { hostApiFetch } from '@/lib/host-api';
@@ -47,31 +49,31 @@ const STEP = {
   COMPLETE: 4,
 } as const;
 
-const steps: SetupStep[] = [
+const getSteps = (t: TFunction): SetupStep[] => [
   {
     id: 'welcome',
-    title: 'Welcome to MossClaw',
-    description: 'Your AI assistant is ready to be configured',
+    title: t('steps.welcome.title'),
+    description: t('steps.welcome.description'),
   },
   {
     id: 'runtime',
-    title: 'Environment Check',
-    description: 'Verifying system requirements',
+    title: t('steps.runtime.title'),
+    description: t('steps.runtime.description'),
   },
   {
     id: 'provider',
-    title: 'AI Provider',
-    description: 'Configure your AI service',
+    title: t('steps.provider.title'),
+    description: t('steps.provider.description'),
   },
   {
     id: 'installing',
-    title: 'Setting Up',
-    description: 'Installing essential components',
+    title: t('steps.installing.title'),
+    description: t('steps.installing.description'),
   },
   {
     id: 'complete',
-    title: 'All Set!',
-    description: 'MossClaw is ready to use',
+    title: t('steps.complete.title'),
+    description: t('steps.complete.description'),
   },
 ];
 
@@ -82,12 +84,12 @@ interface DefaultSkill {
   description: string;
 }
 
-const defaultSkills: DefaultSkill[] = [
-  { id: 'opencode', name: 'OpenCode', description: 'AI coding assistant backend' },
-  { id: 'python-env', name: 'Python Environment', description: 'Python runtime for skills' },
-  { id: 'code-assist', name: 'Code Assist', description: 'Code analysis and suggestions' },
-  { id: 'file-tools', name: 'File Tools', description: 'File operations and management' },
-  { id: 'terminal', name: 'Terminal', description: 'Shell command execution' },
+const getDefaultSkills = (t: TFunction): DefaultSkill[] => [
+  { id: 'opencode', name: t('defaultSkills.opencode.name'), description: t('defaultSkills.opencode.description') },
+  { id: 'python-env', name: t('defaultSkills.python-env.name'), description: t('defaultSkills.python-env.description') },
+  { id: 'code-assist', name: t('defaultSkills.code-assist.name'), description: t('defaultSkills.code-assist.description') },
+  { id: 'file-tools', name: t('defaultSkills.file-tools.name'), description: t('defaultSkills.file-tools.description') },
+  { id: 'terminal', name: t('defaultSkills.terminal.name'), description: t('defaultSkills.terminal.description') },
 ];
 
 import {
@@ -129,6 +131,7 @@ export function Setup() {
   // Runtime check status
   const [runtimeChecksPassed, setRuntimeChecksPassed] = useState(false);
 
+  const steps = getSteps(t);
   const safeStepIndex = Number.isInteger(currentStep)
     ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
     : STEP.WELCOME;
@@ -254,7 +257,7 @@ export function Setup() {
               )}
               {safeStepIndex === STEP.INSTALLING && (
                 <InstallingContent
-                  skills={defaultSkills}
+                  skills={getDefaultSkills(t)}
                   onComplete={handleInstallationComplete}
                   onSkip={() => setCurrentStep((i) => i + 1)}
                 />
@@ -308,16 +311,32 @@ export function Setup() {
 
 function WelcomeContent() {
   const { t } = useTranslation(['setup', 'settings']);
+  const { language, setLanguage } = useSettingsStore();
 
   return (
     <div className="text-center space-y-4">
       <div className="mb-4 flex justify-center">
-        <img src={clawxIcon} alt="MossClaw" className="h-16 w-16" />
+        <img src={clawxIcon} alt="ClawX" className="h-16 w-16" />
       </div>
       <h2 className="text-xl font-semibold">{t('welcome.title')}</h2>
       <p className="text-muted-foreground">
         {t('welcome.description')}
       </p>
+
+      {/* Language Selector */}
+      <div className="flex justify-center gap-2 py-2">
+        {SUPPORTED_LANGUAGES.map((lang) => (
+          <Button
+            key={lang.code}
+            variant={language === lang.code ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setLanguage(lang.code)}
+            className="h-7 text-xs"
+          >
+            {lang.label}
+          </Button>
+        ))}
+      </div>
 
       <ul className="text-left space-y-2 text-muted-foreground pt-2">
         <li className="flex items-center gap-2">
@@ -617,10 +636,10 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         </div>
         <div className="grid grid-cols-[1fr_auto] items-center gap-4 p-3 rounded-lg bg-muted/50">
           <div className="flex items-center gap-2 text-left">
-            <span>Gateway Service</span>
+            <span>{t('runtime.gateway')}</span>
             {checks.gateway.status === 'error' && (
               <Button variant="outline" size="sm" onClick={handleStartGateway}>
-                Start Gateway
+                {t('runtime.startGateway')}
               </Button>
             )}
           </div>
@@ -648,19 +667,19 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
       {showLogs && (
         <div className="mt-4 p-4 rounded-lg bg-black/40 border border-border">
           <div className="flex items-center justify-between mb-2">
-            <p className="font-medium text-foreground text-sm">Application Logs</p>
+            <p className="font-medium text-foreground text-sm">{t('runtime.logs.title')}</p>
             <div className="flex gap-2">
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleOpenLogDir}>
                 <ExternalLink className="h-3 w-3 mr-1" />
-                Open Log Folder
+                {t('runtime.logs.openFolder')}
               </Button>
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowLogs(false)}>
-                Close
+                {t('runtime.logs.close')}
               </Button>
             </div>
           </div>
           <pre className="text-xs text-slate-300 bg-black/50 p-3 rounded max-h-60 overflow-auto whitespace-pre-wrap font-mono">
-            {logContent || '(No logs available yet)'}
+            {logContent || t('runtime.logs.noLogs')}
           </pre>
         </div>
       )}
@@ -701,23 +720,44 @@ function ProviderContent({
   // OAuth Flow State
   const [oauthFlowing, setOauthFlowing] = useState(false);
   const [oauthData, setOauthData] = useState<{
+    mode: 'device';
     verificationUri: string;
     userCode: string;
     expiresIn: number;
+  } | {
+    mode: 'manual';
+    authorizationUrl: string;
+    message?: string;
   } | null>(null);
+  const [manualCodeInput, setManualCodeInput] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
   const pendingOAuthRef = useRef<{ accountId: string; label: string } | null>(null);
 
   // Manage OAuth events
   useEffect(() => {
     const handleCode = (data: unknown) => {
-      setOauthData(data as { verificationUri: string; userCode: string; expiresIn: number });
+      const payload = data as Record<string, unknown>;
+      if (payload?.mode === 'manual') {
+        setOauthData({
+          mode: 'manual',
+          authorizationUrl: String(payload.authorizationUrl || ''),
+          message: typeof payload.message === 'string' ? payload.message : undefined,
+        });
+      } else {
+        setOauthData({
+          mode: 'device',
+          verificationUri: String(payload.verificationUri || ''),
+          userCode: String(payload.userCode || ''),
+          expiresIn: Number(payload.expiresIn || 300),
+        });
+      }
       setOauthError(null);
     };
 
     const handleSuccess = async (data: unknown) => {
       setOauthFlowing(false);
       setOauthData(null);
+      setManualCodeInput('');
       setKeyValid(true);
 
       const payload = (data as { accountId?: string } | undefined) || undefined;
@@ -777,6 +817,7 @@ function ProviderContent({
 
     setOauthFlowing(true);
     setOauthData(null);
+    setManualCodeInput('');
     setOauthError(null);
 
     try {
@@ -802,9 +843,24 @@ function ProviderContent({
   const handleCancelOAuth = async () => {
     setOauthFlowing(false);
     setOauthData(null);
+    setManualCodeInput('');
     setOauthError(null);
     pendingOAuthRef.current = null;
     await hostApiFetch('/api/providers/oauth/cancel', { method: 'POST' });
+  };
+
+  const handleSubmitManualOAuthCode = async () => {
+    const value = manualCodeInput.trim();
+    if (!value) return;
+    try {
+      await hostApiFetch('/api/providers/oauth/submit', {
+        method: 'POST',
+        body: JSON.stringify({ code: value }),
+      });
+      setOauthError(null);
+    } catch (error) {
+      setOauthError(String(error));
+    }
   };
 
   // On mount, try to restore previously configured provider
@@ -1284,6 +1340,42 @@ function ProviderContent({
                         <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto" />
                         <p className="text-sm text-muted-foreground animate-pulse">Requesting secure login code...</p>
                       </div>
+                    ) : oauthData.mode === 'manual' ? (
+                      <div className="space-y-4 w-full">
+                        <div className="space-y-1">
+                          <h3 className="font-medium text-lg">Complete OpenAI Login</h3>
+                          <p className="text-sm text-muted-foreground text-left mt-2">
+                            {oauthData.message || 'Open the authorization page, complete login, then paste the callback URL or code below.'}
+                          </p>
+                        </div>
+
+                        <Button
+                          variant="secondary"
+                          className="w-full"
+                          onClick={() => invokeIpc('shell:openExternal', oauthData.authorizationUrl)}
+                        >
+                          <ExternalLink className="h-4 w-4 mr-2" />
+                          Open Authorization Page
+                        </Button>
+
+                        <Input
+                          placeholder="Paste callback URL or code"
+                          value={manualCodeInput}
+                          onChange={(e) => setManualCodeInput(e.target.value)}
+                        />
+
+                        <Button
+                          className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                          onClick={handleSubmitManualOAuthCode}
+                          disabled={!manualCodeInput.trim()}
+                        >
+                          Submit Code
+                        </Button>
+
+                        <Button variant="ghost" size="sm" className="w-full mt-2" onClick={handleCancelOAuth}>
+                          Cancel
+                        </Button>
+                      </div>
                     ) : (
                       <div className="space-y-4 w-full">
                         <div className="space-y-1">
@@ -1557,9 +1649,9 @@ function CompleteContent({ selectedProvider, installedSkills }: CompleteContentP
   const gatewayStatus = useGatewayStore((state) => state.status);
 
   const providerData = providers.find((p) => p.id === selectedProvider);
-  const installedSkillNames = defaultSkills
-    .filter((s) => installedSkills.includes(s.id))
-    .map((s) => s.name)
+  const installedSkillNames = getDefaultSkills(t)
+    .filter((s: DefaultSkill) => installedSkills.includes(s.id))
+    .map((s: DefaultSkill) => s.name)
     .join(', ');
 
   return (

@@ -1,6 +1,6 @@
 {
     "title": "消息频道",
-    "subtitle": "管理您的消息频道和连接",
+    "subtitle": "连接到消息平台，配置仅对主 Agent 生效",
     "refresh": "刷新",
     "addChannel": "添加频道",
     "stats": {
@@ -8,7 +8,10 @@
         "connected": "已连接",
         "disconnected": "未连接"
     },
-    "gatewayWarning": "网关服务未运行，频道无法连接。",
+    "gatewayWarning": "网关未运行。未启用网关时无法管理频道。",
+    "availableChannels": "可用频道",
+    "supportedChannels": "支持的频道",
+    "pluginBadge": "插件",
     "available": "可用频道",
     "availableDesc": "连接一个新的频道",
     "configured": "已配置频道",
@@ -16,7 +19,6 @@
     "configuredBadge": "已配置",
     "deleteConfirm": "确定要删除此频道吗？",
     "showAll": "显示全部",
-    "pluginBadge": "插件",
     "toast": {
         "whatsappConnected": "WhatsApp 连接成功",
         "whatsappFailed": "WhatsApp 连接失败: {{error}}",
@@ -181,8 +183,26 @@
                 "阅读文档，前往飞书开放平台",
                 "创建一个新应用",
                 "获取 App ID 和 App Secret",
-                "配置事件订阅",
-                "注意：当前OpenClaw文档中未提及，但请务必在权限管理中添加 contact:contact.base:readonly **应用权限**，否则无法正常使用"
+                "配置事件订阅"
+            ]
+        },
+        "wecom": {
+            "description": "通过插件连接企业微信机器人",
+            "docsUrl": "https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657",
+            "fields": {
+                "botId": {
+                    "label": "机器人 Bot ID",
+                    "placeholder": "ww_xxxxxx"
+                },
+                "secret": {
+                    "label": "应用 Secret",
+                    "placeholder": "您的企业微信机器人 Secret"
+                }
+            },
+            "instructions": [
+                "您可以在企业微信管理后台创建应用并获取配置信息",
+                "确保已启用接收消息服务器配置",
+                "填写 Bot ID（可选企业 ID 或者直接使用机器人专属 ID）及 Secret 即可建立连接"
             ]
         },
         "wecom": {
@@ -314,6 +334,25 @@
                 "前往 Mattermost 集成",
                 "创建一个新的 Bot 账户",
                 "复制访问令牌"
+            ]
+        },
+        "qqbot": {
+            "description": "通过 @sliverp/qqbot 插件连接 QQ 机器人",
+            "docsUrl": "https://github.com/sliverp/qqbot/blob/main/README.zh.md",
+            "fields": {
+                "appId": {
+                    "label": "App ID",
+                    "placeholder": "您的 QQ 机器人 App ID"
+                },
+                "clientSecret": {
+                    "label": "Client Secret",
+                    "placeholder": "您的 QQ 机器人 Client Secret"
+                }
+            },
+            "instructions": [
+                "前往 QQ 机器人开放平台注册应用",
+                "获取 App ID 和 Client Secret",
+                "在下方填写凭证信息"
             ]
         }
     },

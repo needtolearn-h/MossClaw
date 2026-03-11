@@ -1,6 +1,6 @@
 {
     "title": "メッセージングチャンネル",
-    "subtitle": "メッセージングチャンネルと接続を管理",
+    "subtitle": "メッセージングチャンネルと接続を管理。設定はメイン Agent のみ有効です",
     "refresh": "更新",
     "addChannel": "チャンネルを追加",
     "stats": {
@@ -9,6 +9,8 @@
         "disconnected": "未接続"
     },
     "gatewayWarning": "ゲートウェイサービスが実行されていないため、チャンネルに接続できません。",
+    "availableChannels": "利用可能なチャンネル",
+    "supportedChannels": "サポートされているチャンネル",
     "available": "利用可能なチャンネル",
     "availableDesc": "新しいチャンネルを接続",
     "configured": "設定済みチャンネル",
@@ -181,8 +183,26 @@
                 "ドキュメントを読み、Feishu Open Platform に移動します",
                 "新しいアプリケーションを作成します",
                 "App ID と App Secret を取得します",
-                "イベント購読を設定します",
-                "注意：現在のドキュメントには記載されていませんが、権限管理で 'contact:contact.base:readonly' **アプリケーション権限** を必ず追加してください"
+                "イベント購読を設定します"
+            ]
+        },
+        "wecom": {
+            "description": "プラグイン経由で WeCom Bot (企業微信) に接続します",
+            "docsUrl": "https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657",
+            "fields": {
+                "botId": {
+                    "label": "ボット ID",
+                    "placeholder": "ww_xxxxxx"
+                },
+                "secret": {
+                    "label": "アプリシークレット",
+                    "placeholder": "WeCom Bot のシークレット"
+                }
+            },
+            "instructions": [
+                "WeCom 管理コンソールでアプリケーションを作成し、設定情報を取得します",
+                "メッセージ受信サーバー設定が有効になっていることを確認します",
+                "ボット ID (または 企業 ID) とシークレットを入力して接続を確立します"
             ]
         },
         "wecom": {
@@ -315,6 +335,25 @@
                 "アクセストークンをコピーします"
             ],
             "docsUrl": "https://docs.openclaw.ai/channels/mattermost"
+        },
+        "qqbot": {
+            "description": "@sliverp/qqbot プラグイン経由で QQ ボットに接続します",
+            "fields": {
+                "appId": {
+                    "label": "App ID",
+                    "placeholder": "QQ ボットの App ID"
+                },
+                "clientSecret": {
+                    "label": "Client Secret",
+                    "placeholder": "QQ ボットの Client Secret"
+                }
+            },
+            "instructions": [
+                "QQ ボットオープンプラットフォームでアプリを登録します",
+                "App ID と Client Secret を取得します",
+                "認証情報を入力します"
+            ],
+            "docsUrl": "https://github.com/sliverp/qqbot/blob/main/README.zh.md"
         }
     },
     "viewDocs": "ドキュメントを表示"

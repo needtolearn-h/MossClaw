@@ -37,6 +37,7 @@ import { getProviderConfig } from '../utils/provider-registry';
 import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
 import { browserOAuthManager, type BrowserOAuthProviderType } from '../utils/browser-oauth';
 import { applyProxySettings } from './proxy';
+import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { getProviderService } from '../services/providers/provider-service';
 import {
@@ -59,12 +60,14 @@ type AppRequest = {
   payload?: unknown;
 };
 
+type AppErrorCode = 'VALIDATION' | 'PERMISSION' | 'TIMEOUT' | 'GATEWAY' | 'INTERNAL' | 'UNSUPPORTED';
+
 type AppResponse = {
   id?: string;
   ok: boolean;
   data?: unknown;
   error?: {
-    code: 'VALIDATION' | 'PERMISSION' | 'TIMEOUT' | 'GATEWAY' | 'INTERNAL' | 'UNSUPPORTED';
+    code: AppErrorCode;
     message: string;
     details?: unknown;
   };
@@ -80,6 +83,8 @@ export function registerIpcHandlers(
 ): void {
   // Unified request protocol (non-breaking: legacy channels remain available)
   registerUnifiedRequestHandlers(gatewayManager);
+
+  // Host API proxy handlers
   registerHostApiProxyHandlers();
 
   // Gateway handlers
@@ -154,7 +159,7 @@ function registerHostApiProxyHandlers(): void {
 
       const method = (request.method || 'GET').toUpperCase();
       const headers: Record<string, string> = { ...(request.headers || {}) };
-      let body: BodyInit | undefined;
+      let body: string | undefined;
 
       if (request.body !== undefined && request.body !== null) {
         if (typeof request.body === 'string') {
@@ -167,7 +172,7 @@ function registerHostApiProxyHandlers(): void {
         }
       }
 
-      const response = await fetch(`http://127.0.0.1:${PORTS.CLAWX_HOST_API}${path}`, {
+      const response = await proxyAwareFetch(`http://127.0.0.1:${PORTS.CLAWX_HOST_API}${path}`, {
         method,
         headers,
         body,
@@ -199,7 +204,7 @@ function registerHostApiProxyHandlers(): void {
   });
 }
 
-function mapAppErrorCode(error: unknown): AppResponse['error']['code'] {
+function mapAppErrorCode(error: unknown): AppErrorCode {
   const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   if (msg.includes('timeout')) return 'TIMEOUT';
   if (msg.includes('permission') || msg.includes('denied') || msg.includes('forbidden')) return 'PERMISSION';
@@ -570,14 +575,20 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             break;
           }
           if (request.action === 'create') {
+            type CronCreateInput = { name: string; message: string; schedule: string; enabled?: boolean };
             const payload = request.payload as
-              | { input?: { name: string; message: string; schedule: string; enabled?: boolean } }
-              | [{ name: string; message: string; schedule: string; enabled?: boolean }]
-              | { name: string; message: string; schedule: string; enabled?: boolean }
+              | { input?: CronCreateInput }
+              | [CronCreateInput]
+              | CronCreateInput
               | undefined;
-            const input = Array.isArray(payload)
-              ? payload[0]
-              : ('input' in (payload ?? {}) ? (payload as { input: { name: string; message: string; schedule: string; enabled?: boolean } }).input : payload);
+            let input: CronCreateInput | undefined;
+            if (Array.isArray(payload)) {
+              input = payload[0];
+            } else if (payload && typeof payload === 'object' && 'input' in payload) {
+              input = payload.input;
+            } else {
+              input = payload as CronCreateInput | undefined;
+            }
             if (!input) throw new Error('Invalid cron.create payload');
             const gatewayInput = {
               name: input.name,
@@ -1323,6 +1334,15 @@ function registerGatewayHandlers(
  * For checking package status and channel configuration
  */
 function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
+  const scheduleGatewayChannelRestart = (reason: string): void => {
+    if (gatewayManager.getStatus().state !== 'stopped') {
+      logger.info(`Scheduling Gateway restart after ${reason}`);
+      gatewayManager.debouncedRestart();
+    } else {
+      logger.info(`Gateway is stopped; skip immediate restart after ${reason}`);
+    }
+  };
+
   async function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
     const targetDir = join(homedir(), '.openclaw', 'extensions', 'dingtalk');
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
@@ -1384,15 +1404,15 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
 
     const candidateSources = app.isPackaged
       ? [
-        join(process.resourcesPath, 'openclaw-plugins', 'wecom'),
-        join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', 'wecom'),
-        join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', 'wecom')
-      ]
+          join(process.resourcesPath, 'openclaw-plugins', 'wecom'),
+          join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', 'wecom'),
+          join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', 'wecom')
+        ]
       : [
-        join(app.getAppPath(), 'build', 'openclaw-plugins', 'wecom'),
-        join(process.cwd(), 'build', 'openclaw-plugins', 'wecom'),
-        join(__dirname, '../../build/openclaw-plugins/wecom'),
-      ];
+          join(app.getAppPath(), 'build', 'openclaw-plugins', 'wecom'),
+          join(process.cwd(), 'build', 'openclaw-plugins', 'wecom'),
+          join(__dirname, '../../build/openclaw-plugins/wecom'),
+        ];
 
     const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
     if (!sourceDir) {
@@ -1419,6 +1439,56 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       return {
         installed: false,
         warning: 'Failed to install bundled WeCom plugin mirror',
+      };
+    }
+  }
+
+  async function ensureQQBotPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+    const targetDir = join(homedir(), '.openclaw', 'extensions', 'qqbot');
+    const targetManifest = join(targetDir, 'openclaw.plugin.json');
+
+    if (existsSync(targetManifest)) {
+      logger.info('QQ Bot plugin already installed from local mirror');
+      return { installed: true };
+    }
+
+    const candidateSources = app.isPackaged
+      ? [
+          join(process.resourcesPath, 'openclaw-plugins', 'qqbot'),
+          join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', 'qqbot'),
+          join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', 'qqbot')
+        ]
+      : [
+          join(app.getAppPath(), 'build', 'openclaw-plugins', 'qqbot'),
+          join(process.cwd(), 'build', 'openclaw-plugins', 'qqbot'),
+          join(__dirname, '../../build/openclaw-plugins/qqbot'),
+        ];
+
+    const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+    if (!sourceDir) {
+      logger.warn('Bundled QQ Bot plugin mirror not found in candidate paths', { candidateSources });
+      return {
+        installed: false,
+        warning: `Bundled QQ Bot plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
+      };
+    }
+
+    try {
+      mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
+      rmSync(targetDir, { recursive: true, force: true });
+      cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
+
+      if (!existsSync(targetManifest)) {
+        return { installed: false, warning: 'Failed to install QQ Bot plugin mirror (manifest missing).' };
+      }
+
+      logger.info(`Installed QQ Bot plugin from bundled mirror: ${sourceDir}`);
+      return { installed: true };
+    } catch (error) {
+      logger.warn('Failed to install QQ Bot plugin from bundled mirror:', error);
+      return {
+        installed: false,
+        warning: 'Failed to install bundled QQ Bot plugin mirror',
       };
     }
   }
@@ -1485,12 +1555,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           };
         }
         await saveChannelConfig(channelType, config);
-        if (gatewayManager.getStatus().state !== 'stopped') {
-          logger.info(`Scheduling Gateway reload after channel:saveConfig (${channelType})`);
-          gatewayManager.debouncedReload();
-        } else {
-          logger.info(`Gateway is stopped; skip immediate reload after channel:saveConfig (${channelType})`);
-        }
+        scheduleGatewayChannelRestart(`channel:saveConfig (${channelType})`);
         return {
           success: true,
           pluginInstalled: installResult.installed,
@@ -1503,6 +1568,22 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           return {
             success: false,
             error: installResult.warning || 'WeCom plugin install failed',
+          };
+        }
+        await saveChannelConfig(channelType, config);
+        scheduleGatewayChannelRestart(`channel:saveConfig (${channelType})`);
+        return {
+          success: true,
+          pluginInstalled: installResult.installed,
+          warning: installResult.warning,
+        };
+      }
+      if (channelType === 'qqbot') {
+        const installResult = await ensureQQBotPluginInstalled();
+        if (!installResult.installed) {
+          return {
+            success: false,
+            error: installResult.warning || 'QQ Bot plugin install failed',
           };
         }
         await saveChannelConfig(channelType, config);
@@ -1519,12 +1600,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
         };
       }
       await saveChannelConfig(channelType, config);
-      if (gatewayManager.getStatus().state !== 'stopped') {
-        logger.info(`Scheduling Gateway reload after channel:saveConfig (${channelType})`);
-        gatewayManager.debouncedReload();
-      } else {
-        logger.info(`Gateway is stopped; skip immediate reload after channel:saveConfig (${channelType})`);
-      }
+      scheduleGatewayChannelRestart(`channel:saveConfig (${channelType})`);
       return { success: true };
     } catch (error) {
       console.error('Failed to save channel config:', error);
@@ -1558,12 +1634,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('channel:deleteConfig', async (_, channelType: string) => {
     try {
       await deleteChannelConfig(channelType);
-      if (gatewayManager.getStatus().state !== 'stopped') {
-        logger.info(`Scheduling Gateway reload after channel:deleteConfig (${channelType})`);
-        gatewayManager.debouncedReload();
-      } else {
-        logger.info(`Gateway is stopped; skip immediate reload after channel:deleteConfig (${channelType})`);
-      }
+      scheduleGatewayChannelRestart(`channel:deleteConfig (${channelType})`);
       return { success: true };
     } catch (error) {
       console.error('Failed to delete channel config:', error);
@@ -1586,12 +1657,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('channel:setEnabled', async (_, channelType: string, enabled: boolean) => {
     try {
       await setChannelEnabled(channelType, enabled);
-      if (gatewayManager.getStatus().state !== 'stopped') {
-        logger.info(`Scheduling Gateway reload after channel:setEnabled (${channelType}, enabled=${enabled})`);
-        gatewayManager.debouncedReload();
-      } else {
-        logger.info(`Gateway is stopped; skip immediate reload after channel:setEnabled (${channelType})`);
-      }
+      scheduleGatewayChannelRestart(`channel:setEnabled (${channelType}, enabled=${enabled})`);
       return { success: true };
     } catch (error) {
       console.error('Failed to set channel enabled:', error);
@@ -1692,7 +1758,7 @@ function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
     ) => {
       try {
         logger.info(`provider:requestOAuth for ${provider}`);
-        if (provider === 'google') {
+        if (provider === 'google' || provider === 'openai') {
           await browserOAuthManager.startFlow(provider, options);
         } else {
           await deviceOAuthManager.startFlow(provider, region, options);
@@ -2447,8 +2513,7 @@ function registerFileHandlers(): void {
  * Performs a soft-delete of a session's JSONL transcript on disk.
  * sessionKey format: "agent:<agentId>:<suffix>" — e.g. "agent:main:session-1234567890".
  * The JSONL file lives at: ~/.openclaw/agents/<agentId>/sessions/<suffix>.jsonl
- * Renaming to <suffix>.deleted.jsonl hides it from sessions.list and token-usage
- * (both already filter out filenames containing ".deleted.").
+ * Renaming to <suffix>.deleted.jsonl hides it from sessions.list.
  */
 function registerSessionHandlers(): void {
   ipcMain.handle('session:delete', async (_, sessionKey: string) => {

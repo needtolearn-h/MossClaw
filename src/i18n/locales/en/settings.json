@@ -50,6 +50,7 @@
       "replaceApiKeyHelp": "Leave this field empty if you want to keep the currently stored API key.",
       "baseUrl": "Base URL",
       "modelId": "Model ID",
+      "protocol": "Protocol",
       "fallbackModels": "Fallback Models",
       "fallbackProviders": "Fallback Providers",
       "fallbackModelIds": "Fallback Model IDs",
@@ -60,6 +61,7 @@
       "change": "Change provider",
       "add": "Add Provider",
       "save": "Save",
+      "customDoc": "Documentation",
       "validate": "Validate"
     },
     "card": {
@@ -72,6 +74,10 @@
       "setDefault": "Set as default",
       "editKey": "Edit API key",
       "delete": "Delete provider"
+    },
+    "protocols": {
+      "openai": "OpenAI Compatible",
+      "anthropic": "Anthropic Compatible"
     },
     "toast": {
       "added": "Provider added successfully",
@@ -189,7 +195,9 @@
       }
     },
     "devMode": "Developer Mode",
-    "devModeDesc": "Show developer tools and shortcuts"
+    "devModeDesc": "Show developer tools and shortcuts",
+    "telemetry": "Anonymous Usage Data",
+    "telemetryDesc": "Allow providing anonymous basic usage data to improve ClawX"
   },
   "developer": {
     "title": "Developer",

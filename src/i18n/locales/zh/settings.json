@@ -50,6 +50,7 @@
       "replaceApiKeyHelp": "如果想保留当前已保存的 API key，这里留空即可。",
       "baseUrl": "基础 URL",
       "modelId": "模型 ID",
+      "protocol": "协议",
       "fallbackModels": "回退模型",
       "fallbackProviders": "跨 Provider 回退",
       "fallbackModelIds": "同 Provider 回退模型 ID",
@@ -60,6 +61,7 @@
       "change": "更换提供商",
       "add": "添加提供商",
       "save": "保存",
+      "customDoc": "查看文档",
       "validate": "验证"
     },
     "card": {
@@ -72,6 +74,10 @@
       "setDefault": "设为默认",
       "editKey": "编辑 API 密钥",
       "delete": "删除提供商"
+    },
+    "protocols": {
+      "openai": "OpenAI 兼容",
+      "anthropic": "Anthropic 兼容"
     },
     "toast": {
       "added": "提供商添加成功",
@@ -189,7 +195,9 @@
       }
     },
     "devMode": "开发者模式",
-    "devModeDesc": "显示开发者工具和快捷方式"
+    "devModeDesc": "显示开发者工具和快捷方式",
+    "telemetry": "匿名使用数据",
+    "telemetryDesc": "允许提供匿名的基础使用数据，用于改进 ClawX"
   },
   "developer": {
     "title": "开发者",

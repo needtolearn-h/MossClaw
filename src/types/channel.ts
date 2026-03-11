@@ -19,7 +19,8 @@ export type ChannelType =
   | 'line'
   | 'msteams'
   | 'googlechat'
-  | 'mattermost';
+  | 'mattermost'
+  | 'qqbot';
 
 /**
  * Channel connection status
@@ -92,6 +93,7 @@ export const CHANNEL_ICONS: Record<ChannelType, string> = {
   msteams: '👔',
   googlechat: '💭',
   mattermost: '💠',
+  qqbot: '🐧',
 };
 
 /**
@@ -111,12 +113,43 @@ export const CHANNEL_NAMES: Record<ChannelType, string> = {
   msteams: 'Microsoft Teams',
   googlechat: 'Google Chat',
   mattermost: 'Mattermost',
+  qqbot: 'QQ Bot',
 };
 
 /**
  * Channel metadata with configuration information
  */
 export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
+  qqbot: {
+    id: 'qqbot',
+    name: 'QQ Bot',
+    icon: '🐧',
+    description: 'channels:meta.qqbot.description',
+    connectionType: 'token',
+    docsUrl: 'channels:meta.qqbot.docsUrl',
+    configFields: [
+      {
+        key: 'appId',
+        label: 'channels:meta.qqbot.fields.appId.label',
+        type: 'text',
+        placeholder: 'channels:meta.qqbot.fields.appId.placeholder',
+        required: true,
+      },
+      {
+        key: 'clientSecret',
+        label: 'channels:meta.qqbot.fields.clientSecret.label',
+        type: 'password',
+        placeholder: 'channels:meta.qqbot.fields.clientSecret.placeholder',
+        required: true,
+      },
+    ],
+    instructions: [
+      'channels:meta.qqbot.instructions.0',
+      'channels:meta.qqbot.instructions.1',
+      'channels:meta.qqbot.instructions.2',
+    ],
+    isPlugin: true,
+  },
   dingtalk: {
     id: 'dingtalk',
     name: 'DingTalk',
@@ -171,7 +204,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
   },
   wecom: {
     id: 'wecom',
-    name: '企业微信',
+    name: 'WeCom',
     icon: '💼',
     description: 'channels:meta.wecom.description',
     connectionType: 'token',
@@ -342,7 +375,6 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
       'channels:meta.feishu.instructions.1',
       'channels:meta.feishu.instructions.2',
       'channels:meta.feishu.instructions.3',
-      'channels:meta.feishu.instructions.4',
     ],
     isPlugin: true,
   },
