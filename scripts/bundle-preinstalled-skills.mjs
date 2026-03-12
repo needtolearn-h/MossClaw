@@ -47,14 +47,25 @@ async function fetchSparseRepo(repo, ref, paths, checkoutDir) {
   const remote = `https://github.com/${repo}.git`;
   mkdirSync(checkoutDir, { recursive: true });
 
-  await $`git init ${checkoutDir}`;
-  await $`git -C ${checkoutDir} remote add origin ${remote}`;
-  await $`git -C ${checkoutDir} sparse-checkout init --cone`;
-  await $`git -C ${checkoutDir} sparse-checkout set ${paths}`;
-  await $`git -C ${checkoutDir} fetch --depth 1 origin ${ref}`;
-  await $`git -C ${checkoutDir} checkout FETCH_HEAD`;
+  // zx 会使用 bash（在 Windows 上可能是 Git Bash），不能用 cmd 命令
+  // 改用纯 JS Node 子进程执行，绕过 zx 的 $`...` 语法
+  const { execSync } = await import('child_process');
 
-  const commit = (await $`git -C ${checkoutDir} rev-parse HEAD`).stdout.trim();
+  const commands = [
+    `git init`,
+    `git remote add origin ${remote}`,
+    `git sparse-checkout init --cone`,
+    `git sparse-checkout set ${paths.join(' ')}`,
+    `git fetch --depth 1 origin ${ref}`,
+    `git checkout FETCH_HEAD`,
+  ];
+
+  for (const cmd of commands) {
+    echo`Executing in ${checkoutDir}: ${cmd}`;
+    execSync(cmd, { cwd: checkoutDir, stdio: 'inherit' });
+  }
+
+  const commit = execSync(`git rev-parse HEAD`, { cwd: checkoutDir }).toString().trim();
   return commit;
 }
 
@@ -83,6 +94,8 @@ for (const group of groups) {
   for (const entry of group.entries) {
     const sourceDir = join(repoDir, entry.repoPath);
     const targetDir = join(OUTPUT_ROOT, entry.slug);
+    echo`   sourceDir ${sourceDir}`
+    echo`   targetDir ${targetDir}`
 
     if (!existsSync(sourceDir)) {
       throw new Error(`Missing source path in repo checkout: ${entry.repoPath}`);
