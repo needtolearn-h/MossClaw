@@ -1001,6 +1001,49 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     console.log('[sanitize] Enforced tools.profile="full" and tools.sessions.visibility="all" for OpenClaw 3.8+');
   }
 
+  // ── plugins.entries.feishu cleanup ──────────────────────────────
+  // The official feishu plugin registers its channel AS 'feishu' via
+  // openclaw.plugin.json.  An explicit entries.feishu.enabled=false
+  // (set by older ClawX to disable the legacy built-in) blocks the
+  // official plugin's channel from starting.  Delete it.
+  if (typeof plugins === 'object' && !Array.isArray(plugins)) {
+    const pluginsObj = plugins as Record<string, unknown>;
+    const pEntries = pluginsObj.entries as Record<string, Record<string, unknown>> | undefined;
+    if (pEntries?.feishu) {
+      console.log('[sanitize] Removing stale plugins.entries.feishu that blocks the official feishu plugin channel');
+      delete pEntries.feishu;
+      modified = true;
+    }
+  }
+
+  // ── channels default-account migration ─────────────────────────
+  // Most OpenClaw channel plugins read the default account's credentials
+  // from the top level of `channels.<type>` (e.g. channels.feishu.appId),
+  // but ClawX historically stored them only under `channels.<type>.accounts.default`.
+  // Mirror the default account credentials at the top level so plugins can
+  // discover them.
+  const channelsObj = config.channels as Record<string, Record<string, unknown>> | undefined;
+  if (channelsObj && typeof channelsObj === 'object') {
+    for (const [channelType, section] of Object.entries(channelsObj)) {
+      if (!section || typeof section !== 'object') continue;
+      const accounts = section.accounts as Record<string, Record<string, unknown>> | undefined;
+      const defaultAccount = accounts?.default;
+      if (!defaultAccount || typeof defaultAccount !== 'object') continue;
+      // Mirror each missing key from accounts.default to the top level
+      let mirrored = false;
+      for (const [key, value] of Object.entries(defaultAccount)) {
+        if (!(key in section)) {
+          section[key] = value;
+          mirrored = true;
+        }
+      }
+      if (mirrored) {
+        modified = true;
+        console.log(`[sanitize] Mirrored ${channelType} default account credentials to top-level channels.${channelType}`);
+      }
+    }
+  }
+
   if (modified) {
     await writeOpenClawJson(config);
     console.log('[sanitize] openclaw.json sanitized successfully');
