@@ -208,7 +208,7 @@ function WelcomeScreen() {
       <div className="flex flex-wrap items-center justify-center gap-2.5 max-w-lg w-full">
         {buttonLabels.map((label, i) => (
           <button 
-            key={key}
+            key={i}
             className="px-4 py-1.5 rounded-full border border-black/10 dark:border-white/10 text-[13px] font-medium text-foreground/70 hover:bg-black/5 dark:hover:bg-white/5 transition-colors bg-black/[0.02]"
           >
             {label}
