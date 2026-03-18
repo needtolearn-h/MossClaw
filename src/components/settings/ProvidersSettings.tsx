@@ -31,6 +31,7 @@ import {
 } from '@/stores/providers';
 import {
   PROVIDER_TYPE_INFO,
+  getProviderDocsUrl,
   type ProviderType,
   getProviderIconUrl,
   resolveProviderApiKeyForSave,
@@ -57,6 +58,15 @@ const labelClasses = 'text-[14px] text-foreground/80 font-bold';
 
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
   return Array.from(new Set((ids ?? []).filter(Boolean)));
+}
+
+function getProtocolBaseUrlPlaceholder(
+  apiProtocol: ProviderAccount['apiProtocol'],
+): string {
+  if (apiProtocol === 'anthropic-messages') {
+    return 'https://api.example.com/anthropic';
+  }
+  return 'https://api.example.com/v1';
 }
 
 function fallbackProviderIdsEqual(a?: string[], b?: string[]): boolean {
@@ -271,7 +281,7 @@ interface ProviderCardProps {
   onSaveEdits: (payload: { newApiKey?: string; updates?: Partial<ProviderConfig> }) => Promise<void>;
   onValidateKey: (
     key: string,
-    options?: { baseUrl?: string; apiProtocol?: string }
+    options?: { baseUrl?: string; apiProtocol?: ProviderAccount['apiProtocol'] }
   ) => Promise<{ valid: boolean; error?: string }>;
   devModeUnlocked: boolean;
 }
@@ -309,6 +319,7 @@ function ProviderCard({
   const [saving, setSaving] = useState(false);
 
   const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === account.vendorId);
+  const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
   const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField);
 
@@ -513,12 +524,10 @@ function ProviderCard({
 
       {isEditing && (
         <div className="space-y-6 mt-4 pt-4 border-t border-black/5 dark:border-white/5">
-          {account.vendorId === 'custom' && (
+          {providerDocsUrl && (
             <div className="flex justify-end -mt-2 mb-2">
               <a
-                href={i18n.language.startsWith('zh')
-                  ? 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#IWQCdfe5fobGU3xf3UGcgbLynGh'
-                  : 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#Ee1ldfvKJoVGvfxc32mcILwenth'}
+                href={providerDocsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[12px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
@@ -537,7 +546,7 @@ function ProviderCard({
                   <Input
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder={apiProtocol === 'anthropic-messages' ? "https://api.example.com/anthropic" : "https://api.example.com/v1"}
+                    placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
                     className={currentInputClasses}
                   />
                 </div>
@@ -562,7 +571,14 @@ function ProviderCard({
                       onClick={() => setApiProtocol('openai-completions')}
                       className={cn("flex-1 py-1.5 px-3 rounded-lg border transition-colors", apiProtocol === 'openai-completions' ? "bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium" : "border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10")}
                     >
-                      {t('aiProviders.protocols.openai', 'OpenAI')}
+                      {t('aiProviders.protocols.openaiCompletions', 'OpenAI Completions')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setApiProtocol('openai-responses')}
+                      className={cn("flex-1 py-1.5 px-3 rounded-lg border transition-colors", apiProtocol === 'openai-responses' ? "bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium" : "border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10")}
+                    >
+                      {t('aiProviders.protocols.openaiResponses', 'OpenAI Responses')}
                     </button>
                     <button
                       type="button"
@@ -740,7 +756,7 @@ interface AddProviderDialogProps {
   onValidateKey: (
     type: string,
     apiKey: string,
-    options?: { baseUrl?: string; apiProtocol?: string }
+    options?: { baseUrl?: string; apiProtocol?: ProviderAccount['apiProtocol'] }
   ) => Promise<{ valid: boolean; error?: string }>;
   devModeUnlocked: boolean;
 }
@@ -783,6 +799,7 @@ function AddProviderDialog({
   const [authMode, setAuthMode] = useState<'oauth' | 'apikey'>('apikey');
 
   const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === selectedType);
+  const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
   const isOAuth = typeInfo?.isOAuth ?? false;
   const supportsApiKey = typeInfo?.supportsApiKey ?? false;
@@ -1076,13 +1093,11 @@ function AddProviderDialog({
                   >
                     {t('aiProviders.dialog.change')}
                   </button>
-                  {selectedType === 'custom' && (
+                  {providerDocsUrl && (
                     <>
                       <span className="mx-2 text-foreground/20">|</span>
                       <a
-                        href={i18n.language.startsWith('zh')
-                          ? 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#IWQCdfe5fobGU3xf3UGcgbLynGh'
-                          : 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#Ee1ldfvKJoVGvfxc32mcILwenth'}
+                        href={providerDocsUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
@@ -1182,7 +1197,7 @@ function AddProviderDialog({
                     <Label htmlFor="baseUrl" className={labelClasses}>{t('aiProviders.dialog.baseUrl')}</Label>
                     <Input
                       id="baseUrl"
-                      placeholder={apiProtocol === 'anthropic-messages' ? "https://api.example.com/anthropic" : "https://api.example.com/v1"}
+                      placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
                       value={baseUrl}
                       onChange={(e) => setBaseUrl(e.target.value)}
                       className={inputClasses}
@@ -1206,20 +1221,27 @@ function AddProviderDialog({
                   </div>
                 )}
                 {selectedType === 'custom' && (
-                  <div className="space-y-2.5">
-                    <Label className={labelClasses}>{t('aiProviders.dialog.protocol', 'Protocol')}</Label>
-                    <div className="flex gap-2 text-[13px]">
-                      <button
-                        type="button"
+                <div className="space-y-2.5">
+                  <Label className={labelClasses}>{t('aiProviders.dialog.protocol', 'Protocol')}</Label>
+                  <div className="flex gap-2 text-[13px]">
+                    <button
+                      type="button"
                         onClick={() => setApiProtocol('openai-completions')}
                         className={cn("flex-1 py-1.5 px-3 rounded-lg border transition-colors", apiProtocol === 'openai-completions' ? "bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium" : "border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10")}
-                      >
-                        {t('aiProviders.protocols.openai', 'OpenAI')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setApiProtocol('anthropic-messages')}
-                        className={cn("flex-1 py-1.5 px-3 rounded-lg border transition-colors", apiProtocol === 'anthropic-messages' ? "bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium" : "border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10")}
+                    >
+                      {t('aiProviders.protocols.openaiCompletions', 'OpenAI Completions')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setApiProtocol('openai-responses')}
+                      className={cn("flex-1 py-1.5 px-3 rounded-lg border transition-colors", apiProtocol === 'openai-responses' ? "bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium" : "border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10")}
+                    >
+                      {t('aiProviders.protocols.openaiResponses', 'OpenAI Responses')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setApiProtocol('anthropic-messages')}
+                      className={cn("flex-1 py-1.5 px-3 rounded-lg border transition-colors", apiProtocol === 'anthropic-messages' ? "bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium" : "border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10")}
                       >
                         {t('aiProviders.protocols.anthropic', 'Anthropic')}
                       </button>

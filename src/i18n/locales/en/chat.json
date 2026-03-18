@@ -2,41 +2,13 @@
     "gatewayNotRunning": "Gateway Not Running",
     "gatewayRequired": "The OpenClaw Gateway needs to be running to use chat. It will start automatically, or you can start it from Settings.",
     "welcome": {
-        "title": "Welcome",
-        "subtitle": "Your AI assistant is ready. Start a conversation below.",
-        "askQuestions": "Ask Questions",
-        "askQuestionsDesc": "Get answers on any topic",
-        "creativeTasks": "Creative Tasks",
-        "creativeTasksDesc": "Writing, brainstorming, ideas",
-        "brainstorming": "Brainstorming",
-        "guide": {
-            "title": "Quick Start",
-            "subtitle": "Try these example questions",
-            "fileOrganize": {
-                "title": "File Organization",
-                "examples": [
-                    "Help me organize the code structure of this project and output a tree diagram",
-                    "Analyze this document and extract the key information",
-                    "Help me format this code and add comments"
-                ]
-            },
-            "documentProcessing": {
-                "title": "Document Processing",
-                "examples": [
-                    "Help me write a README document for this project",
-                    "Organize this meeting record into a structured summary",
-                    "Help me translate this technical document to Chinese"
-                ]
-            },
-            "scheduledTasks": {
-                "title": "Scheduled Tasks",
-                "examples": [
-                    "Create a scheduled task to send daily reports before morning meetings",
-                    "Set up a reminder to collect team weekly reports every Friday",
-                    "How to configure cron expression to check messages every hour?"
-                ]
-            }
-        }
+        "title": "MossClaw Chat",
+        "subtitle": "What can I do for you?",
+        "askQuestions": "Handle Tasks",
+        "askQuestionsDesc": "Work on task-oriented requests",
+        "creativeTasks": "Continuous Execution",
+        "creativeTasksDesc": "Keep running through multi-step work",
+        "brainstorming": "Multi-Agent Parallel"
     },
     "noLogs": "(No logs available yet)",
     "toolbar": {
