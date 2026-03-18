@@ -75,6 +75,8 @@ export interface ProviderTypeInfo {
   isOAuth?: boolean;
   supportsApiKey?: boolean;
   apiKeyUrl?: string;
+  docsUrl?: string;
+  docsUrlZh?: string;
 }
 
 export type ProviderAuthMode =
@@ -145,6 +147,21 @@ export const SETUP_PROVIDERS = PROVIDER_TYPE_INFO;
 /** Get type info by provider type id */
 export function getProviderTypeInfo(type: ProviderType): ProviderTypeInfo | undefined {
   return PROVIDER_TYPE_INFO.find((t) => t.id === type);
+}
+
+export function getProviderDocsUrl(
+  provider: Pick<ProviderTypeInfo, 'docsUrl' | 'docsUrlZh'> | undefined,
+  language: string
+): string | undefined {
+  if (!provider?.docsUrl) {
+    return undefined;
+  }
+
+  if (language.startsWith('zh') && provider.docsUrlZh) {
+    return provider.docsUrlZh;
+  }
+
+  return provider.docsUrl;
 }
 
 export function shouldShowProviderModelId(

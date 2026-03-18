@@ -1,5 +1,10 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
+import {
+    SUPPORTED_LANGUAGE_CODES,
+    resolveSupportedLanguage,
+    type LanguageCode,
+} from '../../shared/language';
 
 // EN
 import enCommon from './locales/en/common.json';
