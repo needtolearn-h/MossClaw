@@ -40,10 +40,8 @@ import jaCron from './locales/ja/cron.json';
 import jaSetup from './locales/ja/setup.json';
 
 export const SUPPORTED_LANGUAGES = [
-    { code: 'zh', label: '中文' },
-] as const;
-
-export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
+    { code: 'zh', label: '中文' }
+] as const satisfies ReadonlyArray<{ code: LanguageCode; label: string }>;
 
 const resources = {
     en: {
@@ -85,8 +83,9 @@ i18n
     .use(initReactI18next)
     .init({
         resources,
-        lng: 'zh', // will be overridden by settings store
+        lng: resolveSupportedLanguage(typeof navigator !== 'undefined' ? navigator.language : undefined),
         fallbackLng: 'zh',
+        supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
         defaultNS: 'common',
         ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'agents', 'skills', 'cron', 'setup'],
         interpolation: {

@@ -68,7 +68,7 @@ function getSystemLocale(): string {
   return preferredLanguages[0]
     || (typeof app.getLocale === 'function' ? app.getLocale() : '')
     || Intl.DateTimeFormat().resolvedOptions().locale
-    || 'en';
+    || 'zh';
 }
 
 function createDefaultSettings(): AppSettings {

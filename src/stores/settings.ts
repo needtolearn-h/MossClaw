@@ -67,7 +67,7 @@ interface SettingsState {
 
 const defaultSettings = {
   theme: 'system' as Theme,
-  language: 'zh',
+  language: resolveSupportedLanguage(typeof navigator !== 'undefined' ? navigator.language : undefined),
   startMinimized: false,
   launchAtStartup: false,
   telemetryEnabled: true,

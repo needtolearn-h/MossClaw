@@ -9,6 +9,7 @@
 export const PROVIDER_TYPES = [
   'aihub-dev',
   'aihub-prd',
+  'anthropic',
   'openai',
   'google',
   'openrouter',
@@ -26,6 +27,7 @@ export type ProviderType = (typeof PROVIDER_TYPES)[number];
 export const BUILTIN_PROVIDER_TYPES = [
   'aihub-dev',
   'aihub-prd',
+  'anthropic',
   'openai',
   'google',
   'openrouter',

@@ -2,40 +2,13 @@
     "gatewayNotRunning": "ゲートウェイが停止中",
     "gatewayRequired": "チャットを利用するには OpenClaw ゲートウェイが実行されている必要があります。自動的に起動するか、設定から起動できます。",
     "welcome": {
-        "title": "MossClaw チャット",
-        "subtitle": "AI アシスタントの準備ができました。下の入力欄から会話を始めましょう。",
-        "askQuestions": "質問する",
-        "askQuestionsDesc": "あらゆるトピックについて回答を得る",
-        "creativeTasks": "クリエイティブタスク",
-        "creativeTasksDesc": "ライティング、ブレスト、アイデア",
-        "guide": {
-            "title": "クイックスタート",
-            "subtitle": "これらのサンプル質問を試してみましょう",
-            "fileOrganize": {
-                "title": "ファイル整理",
-                "examples": [
-                    "このプロジェクトのコード構造を整理してツリー図で出力して",
-                    "このドキュメントを分析して重要な情報を抽出して",
-                    "このコードをフォーマットしてコメントを追加して"
-                ]
-            },
-            "documentProcessing": {
-                "title": "ドキュメント処理",
-                "examples": [
-                    "このプロジェクトの README ドキュメントを書いて",
-                    "この会議記録を構造化された議事録に整理して",
-                    "この技術ドキュメントを中国語に翻訳して"
-                ]
-            },
-            "scheduledTasks": {
-                "title": "定期タスク",
-                "examples": [
-                    "朝会の前に日報を送信する定期タスクを作成して",
-                    "毎週金曜日にチームの週報を収集するリマインダーを設定して",
-                    "1 時間ごとにメッセージをチェックする cron 式の設定方法を教えて"
-                ]
-            }
-        }
+        "title": "ClawX チャット",
+        "subtitle": "お手伝いできることはありますか？",
+        "askQuestions": "タスク対応",
+        "askQuestionsDesc": "タスク指向の依頼に対応します",
+        "creativeTasks": "連続実行",
+        "creativeTasksDesc": "複数ステップの作業を継続して進めます",
+        "brainstorming": "マルチエージェント並列実行"
     },
     "noLogs": "（ログはまだありません）",
     "toolbar": {

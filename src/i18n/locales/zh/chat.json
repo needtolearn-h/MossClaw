@@ -2,39 +2,13 @@
     "gatewayNotRunning": "网关未运行",
     "gatewayRequired": "OpenClaw 网关需要运行才能使用聊天。它将自动启动，或者您可以从设置中启动。",
     "welcome": {
-        "title": "欢迎",
-        "subtitle": "您的 AI 助手已就绪。在下方开始对话。",
-        "askQuestions": "提问",
-        "askQuestionsDesc": "获取任何话题的答案",
-        "creativeTasks": "创意任务",
-        "creativeTasksDesc": "写作、头脑风暴、创意",
-        "brainstorming": "头脑风暴",
-        "guide": {
-            "fileOrganize": {
-                "title": "文件整理",
-                "examples": [
-                    "帮我整理这个项目的代码结构，输出一个树状目录",
-                    "分析这份文档的摘要，提取关键信息",
-                    "帮我格式化这段代码，并添加注释"
-                ]
-            },
-            "documentProcessing": {
-                "title": "文档处理",
-                "examples": [
-                    "帮我写一份项目 README 文档",
-                    "把这段会议记录整理成结构化的纪要",
-                    "帮我翻译这份技术文档为中文"
-                ]
-            },
-            "scheduledTasks": {
-                "title": "定时任务",
-                "examples": [
-                    "创建一个每天早会前发送日报的定时任务",
-                    "设置每周五自动收集团队周报的提醒",
-                    "如何配置 cron 表达式来每小时检查一次消息？"
-                ]
-            }
-        }
+        "title": "MossClaw 聊天",
+        "subtitle": "我能为你做些什么？",
+        "askQuestions": "处理任务",
+        "askQuestionsDesc": "处理面向任务的请求",
+        "creativeTasks": "持续执行",
+        "creativeTasksDesc": "持续推进多步骤工作",
+        "brainstorming": "多智能体并行"
     },
     "noLogs": "（暂无日志）",
     "toolbar": {

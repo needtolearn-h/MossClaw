@@ -32,6 +32,7 @@
         "channelsDescription": "This list is read-only. Manage channel accounts and bindings in the Channels page.",
         "mainAccount": "Main account",
         "channelsManagedInChannels": "This agent is linked to channel types. Manage exact account bindings in the Channels page.",
+        "channelsDescription": "Each channel type has a single MossClaw configuration. Saving a configured channel here moves ownership to this agent.",
         "addChannel": "Add Channel",
         "noChannels": "No channels are assigned to this agent yet."
     },
