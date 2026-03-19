@@ -32,7 +32,8 @@
         "channelsDescription": "该列表为只读。频道账号与绑定关系请在 Channels 页面管理。",
         "mainAccount": "主账号",
         "channelsManagedInChannels": "该 Agent 绑定了频道类型，但具体账号绑定请在 Channels 页面查看。",
-        "addChannel": "添加频道",
+        "addChannel": "添加频道"
+    },
     "removeChannelDialog": {
         "title": "移除频道",
         "message": "确认移除 {{name}}？这会删除当前的频道配置。"

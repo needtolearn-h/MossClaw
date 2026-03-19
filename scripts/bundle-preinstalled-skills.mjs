@@ -88,16 +88,25 @@ async function fetchSparseRepo(repo, ref, paths, checkoutDir) {
   const archivePath = join(checkoutDir, archiveFileName);
   const archivePaths = [...new Set(paths.map(normalizeRepoPath))];
 
-  await $`git init ${gitCheckoutDir}`;
-  await $`git -C ${gitCheckoutDir} remote add origin ${remote}`;
-  await $`git -C ${gitCheckoutDir} fetch --depth 1 origin ${ref}`;
-  // Do not checkout working tree on Windows: upstream repos may contain
-  // Windows-invalid paths. Export only requested directories via git archive.
-  await $`git -C ${gitCheckoutDir} archive --format=tar --output ${archiveFileName} FETCH_HEAD ${archivePaths}`;
-  await extractArchive(archiveFileName, checkoutDir);
-  rmSync(archivePath, { force: true });
+  // zx 会使用 bash（在 Windows 上可能是 Git Bash），不能用 cmd 命令
+  // 改用纯 JS Node 子进程执行，绕过 zx 的 $`...` 语法
+  const { execSync } = await import('child_process');
 
-  const commit = (await $`git -C ${gitCheckoutDir} rev-parse FETCH_HEAD`).stdout.trim();
+  const commands = [
+    `git init`,
+    `git remote add origin ${remote}`,
+    `git sparse-checkout init --cone`,
+    `git sparse-checkout set ${paths.join(' ')}`,
+    `git fetch --depth 1 origin ${ref}`,
+    `git checkout FETCH_HEAD`,
+  ];
+
+  for (const cmd of commands) {
+    echo`Executing in ${checkoutDir}: ${cmd}`;
+    execSync(cmd, { cwd: checkoutDir, stdio: 'inherit' });
+  }
+
+  const commit = execSync(`git rev-parse HEAD`, { cwd: checkoutDir }).toString().trim();
   return commit;
 }
 
