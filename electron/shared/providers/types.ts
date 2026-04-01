@@ -59,6 +59,7 @@ export interface ProviderConfig {
   type: ProviderType;
   baseUrl?: string;
   apiProtocol?: ProviderProtocol;
+  headers?: Record<string, string>;
   model?: string;
   fallbackModels?: string[];
   fallbackProviderIds?: string[];
@@ -88,6 +89,9 @@ export interface ProviderTypeInfo {
   isOAuth?: boolean;
   supportsApiKey?: boolean;
   apiKeyUrl?: string;
+  codePlanPresetBaseUrl?: string;
+  codePlanPresetModelId?: string;
+  codePlanDocsUrl?: string;
 }
 
 export interface ProviderModelEntry extends Record<string, unknown> {
@@ -119,6 +123,7 @@ export interface ProviderAccount {
   authMode: ProviderAuthMode;
   baseUrl?: string;
   apiProtocol?: ProviderProtocol;
+  headers?: Record<string, string>;
   model?: string;
   fallbackModels?: string[];
   fallbackAccountIds?: string[];

@@ -1,4 +1,5 @@
-import { readFile, rm } from 'fs/promises';
+import { existsSync } from 'fs';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -156,5 +157,88 @@ describe('WeCom plugin configuration', () => {
     
     expect(plugins.allow).toContain('wecom');
     expect(plugins.entries['wecom'].enabled).toBe(true);
+  });
+
+  it('saves whatsapp as a built-in channel instead of a plugin', async () => {
+    const { saveChannelConfig } = await import('@electron/utils/channel-config');
+
+    await saveChannelConfig('whatsapp', { enabled: true }, 'default');
+
+    const config = await readOpenClawJson();
+    const channels = config.channels as Record<string, { enabled?: boolean; defaultAccount?: string; accounts?: Record<string, { enabled?: boolean }> }>;
+
+    expect(channels.whatsapp.enabled).toBe(true);
+    expect(channels.whatsapp.defaultAccount).toBe('default');
+    expect(channels.whatsapp.accounts?.default?.enabled).toBe(true);
+    expect(config.plugins).toBeUndefined();
+  });
+
+  it('cleans up stale whatsapp plugin registration when saving built-in config', async () => {
+    const { saveChannelConfig, writeOpenClawConfig } = await import('@electron/utils/channel-config');
+
+    await writeOpenClawConfig({
+      plugins: {
+        enabled: true,
+        allow: ['whatsapp'],
+        entries: {
+          whatsapp: { enabled: true },
+        },
+      },
+    });
+
+    await saveChannelConfig('whatsapp', { enabled: true }, 'default');
+
+    const config = await readOpenClawJson();
+    expect(config.plugins).toBeUndefined();
+    const channels = config.channels as Record<string, { enabled?: boolean }>;
+    expect(channels.whatsapp.enabled).toBe(true);
+  });
+
+  it('keeps configured built-in channels in plugins.allow when a plugin-backed channel is enabled', async () => {
+    const { saveChannelConfig } = await import('@electron/utils/channel-config');
+
+    await saveChannelConfig('discord', { token: 'discord-token' }, 'default');
+    await saveChannelConfig('whatsapp', { enabled: true }, 'default');
+    await saveChannelConfig('qqbot', { appId: 'qq-app', token: 'qq-token', appSecret: 'qq-secret' }, 'default');
+
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as { allow: string[] };
+
+    expect(plugins.allow).toEqual(expect.arrayContaining(['openclaw-qqbot', 'discord', 'whatsapp']));
+  });
+});
+
+describe('WeChat dangling plugin cleanup', () => {
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    vi.resetModules();
+    await rm(testHome, { recursive: true, force: true });
+    await rm(testUserData, { recursive: true, force: true });
+  });
+
+  it('removes dangling openclaw-weixin plugin registration and state when no channel config exists', async () => {
+    const { cleanupDanglingWeChatPluginState, writeOpenClawConfig } = await import('@electron/utils/channel-config');
+
+    await writeOpenClawConfig({
+      plugins: {
+        enabled: true,
+        allow: ['openclaw-weixin'],
+        entries: {
+          'openclaw-weixin': { enabled: true },
+        },
+      },
+    });
+
+    const staleStateDir = join(testHome, '.openclaw', 'openclaw-weixin', 'accounts');
+    await mkdir(staleStateDir, { recursive: true });
+    await writeFile(join(staleStateDir, 'bot-im-bot.json'), JSON.stringify({ token: 'stale-token' }), 'utf8');
+    await writeFile(join(testHome, '.openclaw', 'openclaw-weixin', 'accounts.json'), JSON.stringify(['bot-im-bot']), 'utf8');
+
+    const result = await cleanupDanglingWeChatPluginState();
+    expect(result.cleanedDanglingState).toBe(true);
+
+    const config = await readOpenClawJson();
+    expect(config.plugins).toBeUndefined();
+    expect(existsSync(join(testHome, '.openclaw', 'openclaw-weixin'))).toBe(false);
   });
 });
