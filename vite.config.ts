@@ -62,6 +62,17 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    host: "0.0.0.0",
+    proxy: {
+      '^/api(?!\\/(?:.*\\.ts|.*\\.js))': {
+        target: "https://ai.web.guosen.com.cn",
+        changeOrigin: true,
+      },
+      "/sso": {
+        target: "https://ai.web.guosen.com.cn",
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist',

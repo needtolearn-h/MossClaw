@@ -138,6 +138,8 @@ const electronAPI = {
         'openclaw:getConfigDir',
         'openclaw:getSkillsDir',
         'openclaw:getCliCommand',
+        // login
+        'show-login',
       ];
 
       if (validChannels.includes(channel)) {
@@ -270,6 +272,14 @@ const electronAPI = {
 
 // Expose the API to the renderer process
 contextBridge.exposeInMainWorld('electron', electronAPI);
+
+// 供Moss调用MossClaw主进程方法使用
+contextBridge.exposeInMainWorld('ipcRenderer', {
+  invoke: (channel: string, args: any) => {
+    return ipcRenderer.invoke(channel, args);
+  },
+  on: () => {},
+});
 
 // Type declarations for the renderer process
 export type ElectronAPI = typeof electronAPI;

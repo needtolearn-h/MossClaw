@@ -18,10 +18,11 @@ import { Cron } from './pages/Cron';
 import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { useSettingsStore } from './stores/settings';
+import { Login } from './pages/Login';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
 import { applyGatewayTransportPreference } from './lib/api-client';
-
+import { useAuthStore } from './stores/auth';
 
 /**
  * Error Boundary to catch and display React rendering errors
@@ -98,6 +99,8 @@ function App() {
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const initGateway = useGatewayStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const fetchUserInfo = useAuthStore((state) => state.fetchUserInfo);
 
   useEffect(() => {
     initSettings();
@@ -120,12 +123,34 @@ function App() {
     initProviders();
   }, [initProviders]);
 
-  // Redirect to setup wizard if not complete
+  // Fetch user info when authenticated
   useEffect(() => {
-    if (!setupComplete && !skipSetupForE2E && !location.pathname.startsWith('/setup')) {
-      navigate('/setup');
+    if (isAuthenticated) {
+      fetchUserInfo().catch(console.error);
     }
-  }, [setupComplete, skipSetupForE2E, location.pathname, navigate]);
+  }, [isAuthenticated, fetchUserInfo]);
+
+  // Redirect logic: login -> setup -> main app
+  useEffect(() => {
+    const currentPath = location.pathname;
+
+    // Priority 1: Login (require authentication first)
+    if (!isAuthenticated && currentPath !== '/login') {
+      navigate('/login');
+      return;
+    }
+
+    // Priority 2: Setup wizard (after login, on first launch) 
+    if ( isAuthenticated && !setupComplete && !skipSetupForE2E && !currentPath.startsWith('/setup')) {
+      navigate('/setup');
+      return;
+    }
+
+    // Priority 3: Redirect from login/setup to main if already authenticated and setup complete
+    if ( isAuthenticated && setupComplete && (currentPath === '/login' || currentPath === '/setup')) {
+      navigate('/');
+    }
+  }, [setupComplete, isAuthenticated, skipSetupForE2E, location.pathname, navigate]);
 
   // Listen for navigation events from main process
   useEffect(() => {
@@ -170,6 +195,7 @@ function App() {
         <Routes>
           {/* Setup wizard (shown on first launch) */}
           <Route path="/setup/*" element={<Setup />} />
+          <Route path="/login" element={<Login />} />
 
           {/* Main application routes */}
           <Route element={<MainLayout />}>

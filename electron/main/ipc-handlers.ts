@@ -136,6 +136,8 @@ export function registerIpcHandlers(
 
   // File staging handlers (upload/send separation)
   registerFileHandlers();
+
+  registerLoginHandlers(mainWindow);
 }
 
 function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
@@ -2566,6 +2568,23 @@ function registerSessionHandlers(): void {
     } catch (err) {
       logger.error(`[session:delete] Unexpected error for ${sessionKey}:`, err);
       return { success: false, error: String(err) };
+    }
+  });
+}
+
+/**
+ * 注册登录相关的 IPC 处理器
+ * 用于在需要显示登录界面时重新加载主页面
+ * @param mainWindow - Electron 主窗口实例
+ */
+function registerLoginHandlers(mainWindow: BrowserWindow) {
+  ipcMain.handle('show-login', () => {
+    // 重新加载主页面以显示登录界面
+
+    if (process.env.VITE_DEV_SERVER_URL) {
+      mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    } else {
+      mainWindow.loadFile(join(__dirname, '../../dist/index.html'));
     }
   });
 }
