@@ -9,12 +9,14 @@
 export const PROVIDER_TYPES = [
   'aihub-dev',
   'aihub-prd',
+  'qwen-portal',
   'anthropic',
   'openai',
   'google',
   'openrouter',
   'ark',
   'moonshot',
+  'moonshot-global',
   'siliconflow',
   'minimax-portal',
   'minimax-portal-cn',
@@ -33,6 +35,7 @@ export const BUILTIN_PROVIDER_TYPES = [
   'openrouter',
   'ark',
   'moonshot',
+  'moonshot-global',
   'siliconflow',
   'minimax-portal',
   'minimax-portal-cn',
@@ -195,9 +198,13 @@ export function resolveProviderModelForSave(
   return trimmedModelId || provider?.defaultModelId || undefined;
 }
 
+export function normalizeProviderApiKeyInput(apiKey: string): string {
+  return apiKey.trim();
+}
+
 /** Normalize provider API key before saving; Ollama uses a local placeholder when blank. */
 export function resolveProviderApiKeyForSave(type: ProviderType | string, apiKey: string): string | undefined {
-  const trimmed = apiKey.trim();
+  const trimmed = normalizeProviderApiKeyInput(apiKey);
   if (type === 'ollama') {
     return trimmed || OLLAMA_PLACEHOLDER_API_KEY;
   }
