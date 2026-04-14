@@ -1,0 +1,16 @@
+{
+  "selectLoginMethod": "Please select how to login to MossClaw",
+  "loginMethodsDescription": "Login with SSO or username & password",
+  "ssoLogin": "Login with SSO",
+  "orDivider": "or",
+  "accountPasswordLogin": "Login with username & password",
+  "usernameLabel": "Username",
+  "passwordLabel": "Password",
+  "usernamePlaceholder": "Enter username",
+  "passwordPlaceholder": "Enter password",
+  "rememberMe": "Remember me",
+  "loginButton": "Login",
+  "loggingIn": "Logging in...",
+  "createAccount": "Create Account",
+  "contactAdmin": "Contact admin via WeChat Work"
+}

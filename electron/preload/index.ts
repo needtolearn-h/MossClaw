@@ -23,6 +23,7 @@ const electronAPI = {
         'gateway:rpc',
         'gateway:httpProxy',
         'hostapi:fetch',
+        'hostapi:token',
         'gateway:health',
         'gateway:getControlUiUrl',
         // OpenClaw
@@ -137,6 +138,8 @@ const electronAPI = {
         'openclaw:getConfigDir',
         'openclaw:getSkillsDir',
         'openclaw:getCliCommand',
+        // login
+        'show-login',
       ];
 
       if (validChannels.includes(channel)) {
@@ -159,6 +162,9 @@ const electronAPI = {
         'channel:whatsapp-qr',
         'channel:whatsapp-success',
         'channel:whatsapp-error',
+        'channel:wechat-qr',
+        'channel:wechat-success',
+        'channel:wechat-error',
         'gateway:exit',
         'gateway:error',
         'navigate',
@@ -203,6 +209,12 @@ const electronAPI = {
         'gateway:notification',
         'gateway:channel-status',
         'gateway:chat-message',
+        'channel:whatsapp-qr',
+        'channel:whatsapp-success',
+        'channel:whatsapp-error',
+        'channel:wechat-qr',
+        'channel:wechat-success',
+        'channel:wechat-error',
         'gateway:exit',
         'gateway:error',
         'navigate',
@@ -260,6 +272,14 @@ const electronAPI = {
 
 // Expose the API to the renderer process
 contextBridge.exposeInMainWorld('electron', electronAPI);
+
+// 供Moss调用MossClaw主进程方法使用
+contextBridge.exposeInMainWorld('ipcRenderer', {
+  invoke: (channel: string, args: any) => {
+    return ipcRenderer.invoke(channel, args);
+  },
+  on: () => {},
+});
 
 // Type declarations for the renderer process
 export type ElectronAPI = typeof electronAPI;

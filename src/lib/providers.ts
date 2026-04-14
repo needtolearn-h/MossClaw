@@ -18,7 +18,7 @@ export const PROVIDER_TYPES = [
   'siliconflow',
   'minimax-portal',
   'minimax-portal-cn',
-  'qwen-portal',
+  'modelstudio',
   'ollama',
   'custom',
 ] as const;
@@ -36,7 +36,7 @@ export const BUILTIN_PROVIDER_TYPES = [
   'siliconflow',
   'minimax-portal',
   'minimax-portal-cn',
-  'qwen-portal',
+  'modelstudio',
   'ollama',
 ] as const;
 
@@ -48,6 +48,7 @@ export interface ProviderConfig {
   type: ProviderType;
   baseUrl?: string;
   apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  headers?: Record<string, string>;
   model?: string;
   fallbackModels?: string[];
   fallbackProviderIds?: string[];
@@ -79,6 +80,11 @@ export interface ProviderTypeInfo {
   apiKeyUrl?: string;
   docsUrl?: string;
   docsUrlZh?: string;
+  codePlanPresetBaseUrl?: string;
+  codePlanPresetModelId?: string;
+  codePlanDocsUrl?: string;
+  /** If true, this provider is not shown in the "Add Provider" dialog. */
+  hidden?: boolean;
 }
 
 export type ProviderAuthMode =
@@ -108,6 +114,7 @@ export interface ProviderAccount {
   authMode: ProviderAuthMode;
   baseUrl?: string;
   apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+  headers?: Record<string, string>;
   model?: string;
   fallbackModels?: string[];
   fallbackAccountIds?: string[];

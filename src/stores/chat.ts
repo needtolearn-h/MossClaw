@@ -8,116 +8,24 @@ import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
+import {
+  DEFAULT_CANONICAL_PREFIX,
+  DEFAULT_SESSION_KEY,
+  type AttachedFileMeta,
+  type ChatSession,
+  type ChatState,
+  type ContentBlock,
+  type RawMessage,
+  type ToolStatus,
+} from './chat/types';
 
-// ── Types ────────────────────────────────────────────────────────
-
-/** Metadata for locally-attached files (not from Gateway) */
-export interface AttachedFileMeta {
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-  preview: string | null;
-  filePath?: string;
-}
-
-/** Raw message from OpenClaw chat.history */
-export interface RawMessage {
-  role: 'user' | 'assistant' | 'system' | 'toolresult';
-  content: unknown; // string | ContentBlock[]
-  timestamp?: number;
-  id?: string;
-  toolCallId?: string;
-  toolName?: string;
-  details?: unknown;
-  isError?: boolean;
-  /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
-  _attachedFiles?: AttachedFileMeta[];
-}
-
-/** Content block inside a message */
-export interface ContentBlock {
-  type: 'text' | 'image' | 'thinking' | 'tool_use' | 'tool_result' | 'toolCall' | 'toolResult';
-  text?: string;
-  thinking?: string;
-  source?: { type: string; media_type?: string; data?: string; url?: string };
-  /** Flat image format from Gateway tool results (no source wrapper) */
-  data?: string;
-  mimeType?: string;
-  id?: string;
-  name?: string;
-  input?: unknown;
-  arguments?: unknown;
-  content?: unknown;
-}
-
-/** Session from sessions.list */
-export interface ChatSession {
-  key: string;
-  label?: string;
-  displayName?: string;
-  thinkingLevel?: string;
-  model?: string;
-  updatedAt?: number;
-}
-
-export interface ToolStatus {
-  id?: string;
-  toolCallId?: string;
-  name: string;
-  status: 'running' | 'completed' | 'error';
-  durationMs?: number;
-  summary?: string;
-  updatedAt: number;
-}
-
-interface ChatState {
-  // Messages
-  messages: RawMessage[];
-  loading: boolean;
-  error: string | null;
-
-  // Streaming
-  sending: boolean;
-  activeRunId: string | null;
-  streamingText: string;
-  streamingMessage: unknown | null;
-  streamingTools: ToolStatus[];
-  pendingFinal: boolean;
-  lastUserMessageAt: number | null;
-  /** Images collected from tool results, attached to the next assistant message */
-  pendingToolImages: AttachedFileMeta[];
-
-  // Sessions
-  sessions: ChatSession[];
-  currentSessionKey: string;
-  currentAgentId: string;
-  /** First user message text per session key, used as display label */
-  sessionLabels: Record<string, string>;
-  /** Last message timestamp (ms) per session key, used for sorting */
-  sessionLastActivity: Record<string, number>;
-
-  // Thinking
-  showThinking: boolean;
-  thinkingLevel: string | null;
-
-  // Actions
-  loadSessions: () => Promise<void>;
-  switchSession: (key: string) => void;
-  newSession: () => void;
-  deleteSession: (key: string) => Promise<void>;
-  cleanupEmptySession: () => void;
-  loadHistory: (quiet?: boolean) => Promise<void>;
-  sendMessage: (
-    text: string,
-    attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>,
-    targetAgentId?: string | null,
-  ) => Promise<void>;
-  abortRun: () => Promise<void>;
-  handleChatEvent: (event: Record<string, unknown>) => void;
-  toggleThinking: () => void;
-  refresh: () => Promise<void>;
-  clearError: () => void;
-}
+export type {
+  AttachedFileMeta,
+  ChatSession,
+  ContentBlock,
+  RawMessage,
+  ToolStatus,
+} from './chat/types';
 
 // Module-level timestamp tracking the last chat event received.
 // Used by the safety timeout to avoid false-positive "no response" errors
@@ -203,9 +111,6 @@ function isDuplicateChatEvent(eventState: string, event: Record<string, unknown>
   _chatEventDedupe.set(key, now);
   return false;
 }
-
-const DEFAULT_CANONICAL_PREFIX = 'agent:main';
-const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;
 
 // ── Local image cache ─────────────────────────────────────────
 // The Gateway doesn't store image attachments in session content blocks,
@@ -779,7 +684,14 @@ function buildSessionSwitchPatch(
   >,
   nextSessionKey: string,
 ): Partial<ChatState> {
-  const leavingEmpty = !state.currentSessionKey.endsWith(':main') && state.messages.length === 0;
+  // 仅将没有任何历史记录且无活动时间的会话视为空会话。
+  // 单纯依赖 messages.length 是不可靠的，因为 switchSession 会在真正调用 loadHistory 前抢先清空当前 messages，
+  // 造成竞争条件，使得带有真实历史的会话被判定为空并从侧边栏移除。
+  const leavingEmpty = !state.currentSessionKey.endsWith(':main')
+    && state.messages.length === 0
+    && !state.sessionLastActivity[state.currentSessionKey]
+    && !state.sessionLabels[state.currentSessionKey];
+
   const nextSessions = leavingEmpty
     ? state.sessions.filter((session) => session.key !== state.currentSessionKey)
     : state.sessions;
@@ -863,6 +775,16 @@ function isToolResultRole(role: unknown): boolean {
   if (!role) return false;
   const normalized = String(role).toLowerCase();
   return normalized === 'toolresult' || normalized === 'tool_result';
+}
+
+/** True for internal plumbing messages that should never be shown in the UI. */
+function isInternalMessage(msg: { role?: unknown; content?: unknown }): boolean {
+  if (msg.role === 'system') return true;
+  if (msg.role === 'assistant') {
+    const text = getMessageText(msg.content);
+    if (/^(HEARTBEAT_OK|NO_REPLY)\s*$/.test(text)) return true;
+  }
+  return false;
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -1229,6 +1151,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: (key: string) => {
     if (key === get().currentSessionKey) return;
+    // Stop any background polling for the old session before switching.
+    // This prevents the poll timer from firing after the switch and loading
+    // the wrong session's history into the new session's view.
+    clearHistoryPoll();
     set((s) => buildSessionSwitchPatch(s, key));
     get().loadHistory();
   },
@@ -1302,8 +1228,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // NOTE: We intentionally do NOT call sessions.reset on the old session.
     // sessions.reset archives (renames) the session JSONL file, making old
     // conversation history inaccessible when the user switches back to it.
-    const { currentSessionKey, messages, sessions } = get();
-    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const { currentSessionKey, messages, sessions, sessionLastActivity, sessionLabels } = get();
+    // 仅将没有任何历史记录且无活动时间的会话视为空会话
+    const leavingEmpty = !currentSessionKey.endsWith(':main')
+      && messages.length === 0
+      && !sessionLastActivity[currentSessionKey]
+      && !sessionLabels[currentSessionKey];
     const prefix = getCanonicalPrefixFromSessionKey(currentSessionKey)
       ?? getCanonicalPrefixFromSessions(sessions)
       ?? DEFAULT_CANONICAL_PREFIX;
@@ -1337,12 +1267,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Cleanup empty session on navigate away ──
 
   cleanupEmptySession: () => {
-    const { currentSessionKey, messages } = get();
+    const { currentSessionKey, messages, sessionLastActivity, sessionLabels } = get();
     // Only remove non-main sessions that were never used (no messages sent).
     // This mirrors the "leavingEmpty" logic in switchSession so that creating
     // a new session and immediately navigating away doesn't leave a ghost entry
     // in the sidebar.
-    const isEmptyNonMain = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    // 同样需要综合检查 sessionLastActivity 和 sessionLabels，
+    // 防止因为 switchSession 抢先清空 messages 而误判有历史的会话为空。
+    const isEmptyNonMain = !currentSessionKey.endsWith(':main')
+      && messages.length === 0
+      && !sessionLastActivity[currentSessionKey]
+      && !sessionLabels[currentSessionKey];
     if (!isEmptyNonMain) return;
     set((s) => ({
       sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
@@ -1372,11 +1307,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (!quiet) set({ loading: true, error: null });
 
+    // 安全保护：如果历史记录加载花费太多时间，则强制将 loading 设置为 false
+    // 防止 UI 永远卡在转圈状态。
+    let loadingTimedOut = false;
+    const loadingSafetyTimer = quiet ? null : setTimeout(() => {
+      loadingTimedOut = true;
+      set({ loading: false });
+    }, 15_000);
+
     const loadPromise = (async () => {
+      const isCurrentSession = () => get().currentSessionKey === currentSessionKey;
+      const getPreviewMergeKey = (message: RawMessage): string => (
+        `${message.id ?? ''}|${message.role}|${message.timestamp ?? ''}|${getMessageText(message.content)}`
+      );
+      const mergeHydratedMessages = (
+        currentMessages: RawMessage[],
+        hydratedMessages: RawMessage[],
+      ): RawMessage[] => {
+        const hydratedFilesByKey = new Map(
+          hydratedMessages
+            .filter((message) => message._attachedFiles?.length)
+            .map((message) => [
+              getPreviewMergeKey(message),
+              message._attachedFiles!.map((file) => ({ ...file })),
+            ]),
+        );
+
+        return currentMessages.map((message) => {
+          const attachedFiles = hydratedFilesByKey.get(getPreviewMergeKey(message));
+          return attachedFiles
+            ? { ...message, _attachedFiles: attachedFiles }
+            : message;
+        });
+      };
+
+      const applyLoadFailure = (errorMessage: string | null) => {
+        if (!isCurrentSession()) return;
+        set((state) => {
+          const hasMessages = state.messages.length > 0;
+          return {
+            loading: false,
+            error: !quiet && errorMessage ? errorMessage : state.error,
+            ...(hasMessages ? {} : { messages: [] as RawMessage[] }),
+          };
+        });
+      };
+
       const applyLoadedMessages = (rawMessages: RawMessage[], thinkingLevel: string | null) => {
+      // Guard: if the user switched sessions while this async load was in
+      // flight, discard the result to prevent overwriting the new session's
+      // messages with stale data from the old session.
+      if (!isCurrentSession()) return;
+
       // Before filtering: attach images/files from tool_result messages to the next assistant message
       const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
-      const filteredMessages = messagesWithToolImages.filter((msg) => !isToolResultRole(msg.role));
+      const filteredMessages = messagesWithToolImages.filter((msg) => !isToolResultRole(msg.role) && !isInternalMessage(msg));
       // Restore file attachments for user/assistant messages (from cache + text patterns)
       const enrichedMessages = enrichWithCachedImages(filteredMessages);
 
@@ -1431,17 +1416,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Async: load missing image previews from disk (updates in background)
       loadMissingPreviews(finalMessages).then((updated) => {
+        if (!isCurrentSession()) return;
         if (updated) {
-          // Create new object references so React.memo detects changes.
-          // loadMissingPreviews mutates AttachedFileMeta in place, so we
-          // must produce fresh message + file references for each affected msg.
-          set({
-            messages: finalMessages.map(msg =>
-              msg._attachedFiles
-                ? { ...msg, _attachedFiles: msg._attachedFiles.map(f => ({ ...f })) }
-                : msg
-            ),
-          });
+          set((state) => ({
+            messages: mergeHydratedMessages(state.messages, finalMessages),
+          }));
         }
       });
       const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
@@ -1497,7 +1476,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (fallbackMessages.length > 0) {
             applyLoadedMessages(fallbackMessages, null);
           } else {
-            set({ messages: [], loading: false });
+            applyLoadFailure('Failed to load chat history');
           }
         }
       } catch (err) {
@@ -1506,7 +1485,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (fallbackMessages.length > 0) {
           applyLoadedMessages(fallbackMessages, null);
         } else {
-          set({ messages: [], loading: false });
+          applyLoadFailure(String(err));
         }
       }
     })();
@@ -1515,7 +1494,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await loadPromise;
     } finally {
-      _lastHistoryLoadAtBySession.set(currentSessionKey, Date.now());
+      // 正常完成时清除安全定时器
+      if (loadingSafetyTimer) clearTimeout(loadingSafetyTimer);
+      if (!loadingTimedOut) {
+        // Only update load time if we actually didn't time out
+        _lastHistoryLoadAtBySession.set(currentSessionKey, Date.now());
+      }
+      
       const active = _historyLoadInFlight.get(currentSessionKey);
       if (active === loadPromise) {
         _historyLoadInFlight.delete(currentSessionKey);

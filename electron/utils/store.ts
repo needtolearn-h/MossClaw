@@ -75,7 +75,8 @@ function createDefaultSettings(): AppSettings {
   return {
     // General
     theme: 'system',
-    language: resolveSupportedLanguage(getSystemLocale()),
+    // language: resolveSupportedLanguage(getSystemLocale()),
+    language: "zh",
     startMinimized: false,
     launchAtStartup: false,
     telemetryEnabled: true,

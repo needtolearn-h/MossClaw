@@ -1,0 +1,16 @@
+{
+  "selectLoginMethod": "请选择登录MossClaw的方式",
+  "loginMethodsDescription": "使用SSO或者账号密码进行登录",
+  "ssoLogin": "使用SSO登录",
+  "orDivider": "或",
+  "accountPasswordLogin": "使用账号密码登录",
+  "usernameLabel": "账号",
+  "passwordLabel": "密码",
+  "usernamePlaceholder": "请输入账号",
+  "passwordPlaceholder": "请输入密码",
+  "rememberMe": "记住登录状态",
+  "loginButton": "登录",
+  "loggingIn": "登录中...",
+  "createAccount": "新建账号",
+  "contactAdmin": "请企业微信联系管理员"
+}

@@ -10,6 +10,7 @@ import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { UserAvatar } from '@/components/layout/UserAvatar';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
@@ -75,7 +76,7 @@ export function Chat() {
 
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as unknown as { role?: string; content?: unknown; timestamp?: number }
-    : null;
+      : null;
   const streamText = streamMsg ? extractText(streamMsg) : (typeof streamingMessage === 'string' ? streamingMessage : '');
   const hasStreamText = streamText.trim().length > 0;
   const streamThinking = streamMsg ? extractThinking(streamMsg) : null;
@@ -93,8 +94,9 @@ export function Chat() {
   return (
     <div className={cn("relative flex flex-col -m-6 transition-colors duration-500 dark:bg-background")} style={{ height: 'calc(100vh - 2.5rem)' }}>
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-end px-4 py-2">
+      <div className="flex shrink-0 items-center justify-between px-4 py-2">
         <ChatToolbar />
+        <UserAvatar />
       </div>
 
       {/* Messages Area */}
@@ -116,16 +118,16 @@ export function Chat() {
               {shouldRenderStreaming && (
                 <ChatMessage
                   message={(streamMsg
-                    ? {
-                        ...(streamMsg as Record<string, unknown>),
+                      ? {
+                          ...(streamMsg as Record<string, unknown>),
                         role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
-                        content: streamMsg.content ?? streamText,
-                        timestamp: streamMsg.timestamp ?? streamingTimestamp,
-                      }
-                    : {
-                        role: 'assistant',
-                        content: streamText,
-                        timestamp: streamingTimestamp,
+                          content: streamMsg.content ?? streamText,
+                          timestamp: streamMsg.timestamp ?? streamingTimestamp,
+                        }
+                      : {
+                          role: 'assistant',
+                          content: streamText,
+                          timestamp: streamingTimestamp,
                       }) as RawMessage}
                   showThinking={showThinking}
                   isStreaming
@@ -204,7 +206,7 @@ function WelcomeScreen() {
 
       <div className="flex flex-wrap items-center justify-center gap-2.5 max-w-lg w-full">
         {quickActions.map(({ key, label }) => (
-          <button 
+          <button
             key={key}
             className="px-4 py-1.5 rounded-full border border-black/10 dark:border-white/10 text-[13px] font-medium text-foreground/70 hover:bg-black/5 dark:hover:bg-white/5 transition-colors bg-black/[0.02]"
           >

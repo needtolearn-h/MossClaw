@@ -16,12 +16,14 @@ import {
   getPrimaryChannels,
   type ChannelType,
 } from '@/types/channel';
+import { usesPluginManagedQrAccounts } from '@/lib/channel-alias';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import telegramIcon from '@/assets/channels/telegram.svg';
 import discordIcon from '@/assets/channels/discord.svg';
 import whatsappIcon from '@/assets/channels/whatsapp.svg';
+import wechatIcon from '@/assets/channels/wechat.svg';
 import dingtalkIcon from '@/assets/channels/dingtalk.svg';
 import feishuIcon from '@/assets/channels/feishu.svg';
 import wecomIcon from '@/assets/channels/wecom.svg';
@@ -89,6 +91,10 @@ export function Channels() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
 
   const displayedChannelTypes = getPrimaryChannels();
+  const visibleChannelGroups = channelGroups;
+  const visibleAgents = agents;
+  const hasStableValue = visibleChannelGroups.length > 0 || visibleAgents.length > 0;
+  const isUsingStableValue = hasStableValue && (loading || Boolean(error));
 
   const fetchPageData = useCallback(async () => {
     setLoading(true);
@@ -141,21 +147,21 @@ export function Channels() {
   }, [fetchPageData, gatewayStatus.state]);
 
   const configuredTypes = useMemo(
-    () => channelGroups.map((group) => group.channelType),
-    [channelGroups],
+    () => visibleChannelGroups.map((group) => group.channelType),
+    [visibleChannelGroups],
   );
 
   const groupedByType = useMemo(() => {
-    return Object.fromEntries(channelGroups.map((group) => [group.channelType, group]));
-  }, [channelGroups]);
+    return Object.fromEntries(visibleChannelGroups.map((group) => [group.channelType, group]));
+  }, [visibleChannelGroups]);
 
   const configuredGroups = useMemo(() => {
     const known = displayedChannelTypes
       .map((type) => groupedByType[type])
       .filter((group): group is ChannelGroupItem => Boolean(group));
-    const unknown = channelGroups.filter((group) => !displayedChannelTypes.includes(group.channelType as ChannelType));
+    const unknown = visibleChannelGroups.filter((group) => !displayedChannelTypes.includes(group.channelType as ChannelType));
     return [...known, ...unknown];
-  }, [channelGroups, displayedChannelTypes, groupedByType]);
+  }, [visibleChannelGroups, displayedChannelTypes, groupedByType]);
 
   const unsupportedGroups = displayedChannelTypes.filter((type) => !configuredTypes.includes(type));
 
@@ -215,7 +221,7 @@ export function Channels() {
     return nextAccountId;
   };
 
-  if (loading) {
+  if (loading && !hasStableValue) {
     return (
       <div className="flex flex-col -m-6 dark:bg-background min-h-[calc(100vh-2.5rem)] items-center justify-center">
         <LoadingSpinner size="lg" />
@@ -224,7 +230,7 @@ export function Channels() {
   }
 
   return (
-    <div className="flex flex-col -m-6 dark:bg-background h-[calc(100vh-2.5rem)] overflow-hidden">
+    <div data-testid="channels-page" className="flex flex-col -m-6 dark:bg-background h-[calc(100vh-2.5rem)] overflow-hidden">
       <div className="w-full max-w-5xl mx-auto flex flex-col h-full p-10 pt-16">
         <div className="flex flex-col md:flex-row md:items-start justify-between mb-12 shrink-0 gap-4">
           <div>
@@ -243,7 +249,7 @@ export function Channels() {
               disabled={gatewayStatus.state !== 'running'}
               className="h-9 text-[13px] font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground transition-colors"
             >
-              <RefreshCw className="h-3.5 w-3.5 mr-2" />
+              <RefreshCw className={cn('h-3.5 w-3.5 mr-2', isUsingStableValue && 'animate-spin')} />
               {t('refresh')}
             </Button>
           </div>
@@ -307,14 +313,17 @@ export function Channels() {
                           variant="outline"
                           className="h-8 text-xs rounded-full"
                           onClick={() => {
-                            const nextAccountId = createNewAccountId(
-                              group.channelType,
-                              group.accounts.map((item) => item.accountId),
-                            );
+                            const shouldUseGeneratedAccountId = !usesPluginManagedQrAccounts(group.channelType);
+                            const nextAccountId = shouldUseGeneratedAccountId
+                              ? createNewAccountId(
+                                group.channelType,
+                                group.accounts.map((item) => item.accountId),
+                              )
+                              : undefined;
                             setSelectedChannelType(group.channelType as ChannelType);
                             setSelectedAccountId(nextAccountId);
                             setAllowExistingConfigInModal(false);
-                            setAllowEditAccountIdInModal(true);
+                            setAllowEditAccountIdInModal(shouldUseGeneratedAccountId);
                             setExistingAccountIdsForModal(group.accounts.map((item) => item.accountId));
                             setInitialConfigValuesForModal(undefined);
                             setShowConfigModal(true);
@@ -363,7 +372,7 @@ export function Channels() {
                                 }}
                               >
                                 <option value="">{t('account.unassigned')}</option>
-                                {agents.map((agent) => (
+                                {visibleAgents.map((agent) => (
                                   <option key={agent.id} value={agent.id}>{agent.name}</option>
                                 ))}
                               </select>
@@ -519,6 +528,8 @@ function ChannelLogo({ type }: { type: ChannelType }) {
       return <img src={discordIcon} alt="Discord" className="w-[22px] h-[22px] dark:invert" />;
     case 'whatsapp':
       return <img src={whatsappIcon} alt="WhatsApp" className="w-[22px] h-[22px] dark:invert" />;
+    case 'wechat':
+      return <img src={wechatIcon} alt="WeChat" className="w-[22px] h-[22px] dark:invert" />;
     case 'dingtalk':
       return <img src={dingtalkIcon} alt="DingTalk" className="w-[22px] h-[22px] dark:invert" />;
     case 'feishu':

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Channels } from '@/pages/Channels/index';
 
 const hostApiFetchMock = vi.fn();
@@ -36,6 +36,14 @@ vi.mock('sonner', () => ({
     warning: vi.fn(),
   },
 }));
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 describe('Channels page status refresh', () => {
   beforeEach(() => {
@@ -124,6 +132,142 @@ describe('Channels page status refresh', () => {
       const agentFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/agents');
       expect(channelFetchCalls).toHaveLength(2);
       expect(agentFetchCalls).toHaveLength(2);
+    });
+  });
+
+  it('treats WeChat accounts as plugin-managed QR accounts', async () => {
+    subscribeHostEventMock.mockImplementation(() => vi.fn());
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/channels/accounts') {
+        return {
+          success: true,
+          channels: [
+            {
+              channelType: 'wechat',
+              defaultAccountId: 'wx-bot-im-bot',
+              status: 'connected',
+              accounts: [
+                {
+                  accountId: 'wx-bot-im-bot',
+                  name: 'WeChat ClawBot',
+                  configured: true,
+                  status: 'connected',
+                  isDefault: true,
+                },
+              ],
+            },
+          ],
+        };
+      }
+
+      if (path === '/api/agents') {
+        return {
+          success: true,
+          agents: [],
+        };
+      }
+
+      if (path === '/api/channels/wechat/cancel') {
+        return { success: true };
+      }
+
+      throw new Error(`Unexpected host API path: ${path}`);
+    });
+
+    render(<Channels />);
+
+    await waitFor(() => {
+      expect(screen.getByText('WeChat')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'account.add' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('dialog.configureTitle')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByLabelText('account.customIdLabel')).not.toBeInTheDocument();
+  });
+
+  it('keeps the last channel snapshot visible while refresh is pending', async () => {
+    subscribeHostEventMock.mockImplementation(() => vi.fn());
+
+    const channelsDeferred = createDeferred<{
+      success: boolean;
+      channels: Array<Record<string, unknown>>;
+    }>();
+    const agentsDeferred = createDeferred<{
+      success: boolean;
+      agents: Array<Record<string, unknown>>;
+    }>();
+
+    let refreshCallCount = 0;
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/channels/accounts') {
+        if (refreshCallCount === 0) {
+          refreshCallCount += 1;
+          return Promise.resolve({
+            success: true,
+            channels: [
+              {
+                channelType: 'feishu',
+                defaultAccountId: 'default',
+                status: 'connected',
+                accounts: [
+                  {
+                    accountId: 'default',
+                    name: 'Primary Account',
+                    configured: true,
+                    status: 'connected',
+                    isDefault: true,
+                  },
+                ],
+              },
+            ],
+          });
+        }
+        return channelsDeferred.promise;
+      }
+
+      if (path === '/api/agents') {
+        if (refreshCallCount === 1) {
+          return Promise.resolve({ success: true, agents: [] });
+        }
+        return agentsDeferred.promise;
+      }
+
+      throw new Error(`Unexpected host API path: ${path}`);
+    });
+
+    render(<Channels />);
+
+    expect(await screen.findByText('Feishu / Lark')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
+
+    expect(screen.getByText('Feishu / Lark')).toBeInTheDocument();
+
+    await act(async () => {
+      channelsDeferred.resolve({
+        success: true,
+        channels: [
+          {
+            channelType: 'feishu',
+            defaultAccountId: 'default',
+            status: 'connected',
+            accounts: [
+              {
+                accountId: 'default',
+                name: 'Primary Account',
+                configured: true,
+                status: 'connected',
+                isDefault: true,
+              },
+            ],
+          },
+        ],
+      });
+      agentsDeferred.resolve({ success: true, agents: [] });
     });
   });
 });
