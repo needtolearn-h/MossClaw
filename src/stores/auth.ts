@@ -20,7 +20,12 @@ interface AuthState {
   userInfo: UserInfo | null;
 
   // Actions
-  login: (username: string, pwd: string, isRemember: boolean) => Promise<void>;
+  login: (
+    username: string,
+    pwd: string,
+    isRemember: boolean,
+    captchaVerification?: string
+  ) => Promise<void>;
   logout: () => Promise<void>;
   ssoLoginStatus: (loginToken: string) => Promise<void>;
   fetchUserInfo: () => Promise<void>;
@@ -32,7 +37,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   username: null,
   userInfo: null,
 
-  login: async (username, pwd, isRemember) => {
+  login: async (username, pwd, isRemember, captchaVerification) => {
     const response = await fetch(`${apiUrl}/api/identification/login`, {
       method: 'POST',
       headers: {
@@ -43,6 +48,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         password: pwd,
         loginType: 2,
         isRemember,
+        ...(captchaVerification ? { captchaVerification } : {}),
       }),
     });
 
@@ -68,7 +74,6 @@ export const useAuthStore = create<AuthState>((set) => ({
         'Content-Type': 'application/json',
       },
     });
-    console.log("------------")
     // 清除 AIGC_SESSION cookie
     document.cookie = 'AIGC_SESSION=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
 
@@ -92,7 +97,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({
         isAuthenticated: true,
       });
-      return data.data
+      return data.data;
     } else {
       throw new Error(data.message);
     }
