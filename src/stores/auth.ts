@@ -68,7 +68,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: async () => {
-    await fetch('/api/identification/logout', {
+    await fetch(`${apiUrl}/api/identification/logout`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -104,7 +104,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   fetchUserInfo: async () => {
-    const response = await fetch('/api/v1/user/info');
+    const response = await fetch(`${apiUrl}/api/v1/user/info`);
 
     if (!response.ok) {
       throw new Error('Failed to fetch user info');

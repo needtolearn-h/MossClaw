@@ -81,7 +81,7 @@ export function Login() {
   };
 
   const handleCaptchaError = () => {
-    pendingLoginRef.current = null;
+    // pendingLoginRef.current = null;
   };
 
   const baseUrl = import.meta.env.VITE_BASE_URL;

@@ -43,6 +43,7 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
+import { getClawXProviderStore } from "../services/providers/store-instance"
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
@@ -307,11 +308,13 @@ async function initialize(): Promise<void> {
     createTray(window);
   }
 
+  const store = await getClawXProviderStore();
+
   // Override security headers ONLY for the OpenClaw Gateway Control UI.
   // The URL filter ensures this callback only fires for gateway requests,
   // avoiding unnecessary overhead on every other HTTP response.
   session.defaultSession.webRequest.onHeadersReceived(
-    { urls: ['http://127.0.0.1:18789/*', 'http://localhost:18789/*'] },
+    { urls: ['http://127.0.0.1:18789/*', 'http://localhost:18789/*', 'https://ai.web.guosen.com.cn/*'] },
     (details, callback) => {
       const headers = { ...details.responseHeaders };
       delete headers['X-Frame-Options'];
@@ -326,8 +329,43 @@ async function initialize(): Promise<void> {
           (csp) => csp.replace(/frame-ancestors\s+'none'/g, "frame-ancestors 'self' *")
         );
       }
+      if (headers && headers['set-cookie']) {
+        let cookie = "";
+        const cookies =  headers['set-cookie']
+        // StoreService.configStore.delete("loginCookie");
+        for (let i = 0; i < cookies.length; i++) {
+          cookie += headers["set-cookie"][i];
+        }
+        for (let i = 0; i < cookies.length; i++) {
+          headers["set-cookie"][i] +=
+            ";SameSite=None;Secure;partitioned";
+        }
+        store.set("loginCookie", cookie);
+      }
+      // iframe sso
+      if (headers && headers["set-cookie"]) {
+        if (!Array.isArray(headers["Set-Cookie"])) {
+          headers["Set-Cookie"] = [];
+        }
+        headers["set-cookie"].reduce((acc, cookie) => {
+          acc.push(`${cookie}; SameSite=None; Secure`);
+          return acc;
+        }, headers["Set-Cookie"]);
+      }
       callback({ responseHeaders: headers });
     },
+  );
+
+  const filter = { urls: [] };
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    filter,
+    (details, callback) => {
+      if (details.requestHeaders && !details.requestHeaders["Cookie"]) {
+        const cookie = store.get("loginCookie");
+        details.requestHeaders!["Cookie"] = cookie as string;
+      }
+      callback({ requestHeaders: details.requestHeaders });
+    }
   );
 
   // Register IPC handlers
