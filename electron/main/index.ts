@@ -269,6 +269,47 @@ function createMainWindow(): BrowserWindow {
   });
 
   mainWindow = win;
+
+  // Inject a "返回登录" (Back to Login) button on the SSO page.
+  // The SSO page loads via a full-window navigation (location.href),
+  // so the React app is unloaded. This injects a floating button that
+  // lets users return to the login form without completing SSO.
+  const SSO_URL_PREFIX = 'https://ai.web.guosen.com.cn/sso/';
+
+  win.webContents.on('did-finish-load', () => {
+    const url = win.webContents.getURL();
+    if (url.startsWith(SSO_URL_PREFIX)) {
+      win.webContents
+        .executeJavaScript(
+          `
+        (function() {
+          if (document.getElementById('__clawx-back-btn')) return;
+          var btn = document.createElement('button');
+          btn.id = '__clawx-back-btn';
+          btn.textContent = '\\u2039';
+          btn.title = '\\u8fd4\\u56de\\u767b\\u5f55';
+          btn.style.cssText = 'position:fixed;top:50px;left:16px;z-index:999999;width:36px;height:36px;border-radius:6px;background:#fff;color:#333;border:1px solid #d9d9d9;cursor:pointer;font-size:24px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.08);';
+          btn.addEventListener('mouseenter', function() { btn.style.borderColor = '#7657FF'; btn.style.color = '#7657FF'; });
+          btn.addEventListener('mouseleave', function() { btn.style.borderColor = '#d9d9d9'; btn.style.color = '#333'; });
+          btn.addEventListener('click', function() {
+            if (window.electron && window.electron.ipcRenderer) {
+              window.electron.ipcRenderer.invoke('show-login');
+            }
+          });
+          if (document.body) {
+            document.body.appendChild(btn);
+          } else {
+            document.addEventListener('DOMContentLoaded', function() {
+              document.body && document.body.appendChild(btn);
+            });
+          }
+        })();
+      `
+        )
+        .catch(() => {});
+    }
+  });
+
   return win;
 }
 
