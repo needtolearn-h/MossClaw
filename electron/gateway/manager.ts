@@ -61,6 +61,8 @@ export interface GatewayStatus {
   connectedAt?: number;
   version?: string;
   reconnectAttempts?: number;
+  /** True once the gateway's internal subsystems (skills, plugins) are ready for RPC calls. */
+  gatewayReady?: boolean;
 }
 
 /**
@@ -112,8 +114,18 @@ export class GatewayManager extends EventEmitter {
   private static readonly HEARTBEAT_INTERVAL_MS = 30_000;
   private static readonly HEARTBEAT_TIMEOUT_MS = 12_000;
   private static readonly HEARTBEAT_MAX_MISSES = 3;
+  // Windows-specific heartbeat parameters — more lenient to reduce log noise
+  // from false positives caused by Windows Defender scans, system updates,
+  // and synchronous event-loop blocking in the gateway.
+  private static readonly HEARTBEAT_INTERVAL_MS_WIN = 60_000;
+  private static readonly HEARTBEAT_TIMEOUT_MS_WIN = 25_000;
+  private static readonly HEARTBEAT_MAX_MISSES_WIN = 5;
   public static readonly RESTART_COOLDOWN_MS = 5_000;
+  private static readonly GATEWAY_READY_FALLBACK_MS = 30_000;
   private lastRestartAt = 0;
+  /** Set by scheduleReconnect() before calling start() to signal auto-reconnect. */
+  private isAutoReconnectStart = false;
+  private gatewayReadyFallbackTimer: NodeJS.Timeout | null = null;
 
   constructor(config?: Partial<ReconnectConfig>) {
     super();
@@ -144,6 +156,14 @@ export class GatewayManager extends EventEmitter {
     this.reconnectConfig = { ...DEFAULT_RECONNECT_CONFIG, ...config };
     // Device identity is loaded lazily in start() — not in the constructor —
     // so that async file I/O and key generation don't block module loading.
+
+    this.on('gateway:ready', () => {
+      this.clearGatewayReadyFallback();
+      if (this.status.state === 'running' && !this.status.gatewayReady) {
+        logger.info('Gateway subsystems ready (event received)');
+        this.setStatus({ gatewayReady: true });
+      }
+    });
   }
 
   private async initDeviceIdentity(): Promise<void> {
@@ -216,18 +236,29 @@ export class GatewayManager extends EventEmitter {
       logger.debug('Cleared pending reconnect timer because start was requested manually');
     }
 
-    this.reconnectAttempts = 0;
-    this.setStatus({ state: 'starting', reconnectAttempts: 0 });
+    // Only reset reconnectAttempts on manual start, not on auto-reconnect.
+    // Auto-reconnect calls start() via scheduleReconnect(); those should
+    // accumulate attempts so the maxAttempts cap works correctly.
+    if (!this.isAutoReconnectStart) {
+      this.reconnectAttempts = 0;
+    }
+    this.isAutoReconnectStart = false; // consume the flag
+    this.setStatus({ state: 'starting', reconnectAttempts: this.reconnectAttempts, gatewayReady: false });
 
     // Check if Python environment is ready (self-healing) asynchronously.
     // Fire-and-forget: only needs to run once, not on every retry.
     warmupManagedPythonReadiness();
+
+    const t0 = Date.now();
+    let tSpawned = 0;
+    let tReady = 0;
 
     try {
       await runGatewayStartupSequence({
         port: this.status.port,
         ownedPid: this.process?.pid,
         shouldWaitForPortFree: process.platform === 'win32',
+        hasOwnedProcess: () => this.process?.pid != null && this.ownsProcess,
         resetStartupStderrLines: () => {
           this.recentStartupStderrLines = [];
         },
@@ -247,7 +278,6 @@ export class GatewayManager extends EventEmitter {
           await this.connect(port, externalToken);
         },
         onConnectedToExistingGateway: () => {
-
           // If the existing gateway is actually our own spawned UtilityProcess
           // (e.g. after a self-restart code=1012), keep ownership so that
           // stop() can still terminate the process during a restart() cycle.
@@ -257,6 +287,15 @@ export class GatewayManager extends EventEmitter {
             this.setStatus({ pid: undefined });
           }
 
+          // Treat a successful reconnect to the owned process as a restart
+          // completion (e.g. after a Gateway code-1012 in-process restart).
+          // This updates lastRestartCompletedAt so that flushDeferredRestart
+          // drops any deferred restart requested before this reconnect,
+          // avoiding a redundant kill+respawn cycle.
+          if (isOwnProcess) {
+            this.restartController.recordRestartCompleted();
+          }
+
           this.startHealthCheck();
         },
         waitForPortFree: async (port) => {
@@ -264,16 +303,24 @@ export class GatewayManager extends EventEmitter {
         },
         startProcess: async () => {
           await this.startProcess();
+          tSpawned = Date.now();
         },
         waitForReady: async (port) => {
           await waitForGatewayReady({
             port,
             getProcessExitCode: () => this.processExitCode,
           });
+          tReady = Date.now();
         },
         onConnectedToManagedGateway: () => {
           this.startHealthCheck();
-          logger.debug('Gateway started successfully');
+          const tConnected = Date.now();
+          logger.info('[metric] gateway.startup', {
+            configSyncMs: tSpawned ? tSpawned - t0 : undefined,
+            spawnToReadyMs: tReady && tSpawned ? tReady - tSpawned : undefined,
+            readyToConnectMs: tReady ? tConnected - tReady : undefined,
+            totalMs: tConnected - t0,
+          });
         },
         runDoctorRepair: async () => await runOpenClawDoctorRepair(),
         onDoctorRepairSuccess: () => {
@@ -365,7 +412,8 @@ export class GatewayManager extends EventEmitter {
     clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
 
     this.restartController.resetDeferredRestart();
-    this.setStatus({ state: 'stopped', error: undefined, pid: undefined, connectedAt: undefined, uptime: undefined });
+    this.isAutoReconnectStart = false;
+    this.setStatus({ state: 'stopped', error: undefined, pid: undefined, connectedAt: undefined, uptime: undefined, gatewayReady: undefined });
   }
 
   /**
@@ -431,7 +479,16 @@ export class GatewayManager extends EventEmitter {
     logger.info(`[gateway-refresh] mode=restart requested pidBefore=${pidBefore ?? 'n/a'}`);
     this.restartInFlight = (async () => {
       await this.stop();
-      await this.start();
+      try {
+        await this.start();
+      } catch (err) {
+        // stop() set shouldReconnect=false. Restore it so the gateway
+        // can self-heal via scheduleReconnect() instead of dying permanently.
+        logger.warn('Gateway restart: start() failed after stop(), enabling auto-reconnect recovery', err);
+        this.shouldReconnect = true;
+        this.scheduleReconnect();
+        throw err;
+      }
     })();
 
     try {
@@ -629,6 +686,25 @@ export class GatewayManager extends EventEmitter {
       clearTimeout(this.reloadDebounceTimer);
       this.reloadDebounceTimer = null;
     }
+    this.clearGatewayReadyFallback();
+  }
+
+  private clearGatewayReadyFallback(): void {
+    if (this.gatewayReadyFallbackTimer) {
+      clearTimeout(this.gatewayReadyFallbackTimer);
+      this.gatewayReadyFallbackTimer = null;
+    }
+  }
+
+  private scheduleGatewayReadyFallback(): void {
+    this.clearGatewayReadyFallback();
+    this.gatewayReadyFallbackTimer = setTimeout(() => {
+      this.gatewayReadyFallbackTimer = null;
+      if (this.status.state === 'running' && !this.status.gatewayReady) {
+        logger.info('Gateway ready fallback triggered (no gateway.ready event within timeout)');
+        this.setStatus({ gatewayReady: true });
+      }
+    }, GatewayManager.GATEWAY_READY_FALLBACK_MS);
   }
 
   /**
@@ -760,8 +836,19 @@ export class GatewayManager extends EventEmitter {
 
         if (this.status.state === 'running') {
           this.setStatus({ state: 'stopped' });
-          this.scheduleReconnect();
         }
+
+        // Always attempt reconnect from process exit.  scheduleReconnect()
+        // internally checks shouldReconnect and reconnect-timer guards, so
+        // calling it unconditionally is safe — intentional stop() calls set
+        // shouldReconnect=false which makes scheduleReconnect() no-op.
+        //
+        // On Windows, the WS close handler intentionally skips reconnect
+        // (to avoid racing with this exit handler).  However, WS close
+        // fires *before* process exit and sets state='stopped', which
+        // previously caused this handler to also skip reconnect — leaving
+        // the gateway permanently dead with no recovery path.
+        this.scheduleReconnect();
       },
       onError: () => {
         this.ownsProcess = false;
@@ -798,6 +885,7 @@ export class GatewayManager extends EventEmitter {
           connectedAt: Date.now(),
         });
         this.startPing();
+        this.scheduleGatewayReadyFallback();
       },
       onMessage: (message) => {
         this.handleMessage(message);
@@ -881,40 +969,41 @@ export class GatewayManager extends EventEmitter {
    * Start ping interval to keep connection alive
    */
   private startPing(): void {
+    const isWindows = process.platform === 'win32';
     this.connectionMonitor.startPing({
-      intervalMs: GatewayManager.HEARTBEAT_INTERVAL_MS,
-      timeoutMs: GatewayManager.HEARTBEAT_TIMEOUT_MS,
-      maxConsecutiveMisses: GatewayManager.HEARTBEAT_MAX_MISSES,
+      intervalMs: isWindows
+        ? GatewayManager.HEARTBEAT_INTERVAL_MS_WIN
+        : GatewayManager.HEARTBEAT_INTERVAL_MS,
+      timeoutMs: isWindows
+        ? GatewayManager.HEARTBEAT_TIMEOUT_MS_WIN
+        : GatewayManager.HEARTBEAT_TIMEOUT_MS,
+      maxConsecutiveMisses: isWindows
+        ? GatewayManager.HEARTBEAT_MAX_MISSES_WIN
+        : GatewayManager.HEARTBEAT_MAX_MISSES,
       sendPing: () => {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.ping();
         }
       },
       onHeartbeatTimeout: ({ consecutiveMisses, timeoutMs }) => {
-        if (this.status.state !== 'running' || !this.shouldReconnect) {
-          return;
-        }
-        const ws = this.ws;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          return;
-        }
-
+        // Heartbeat timeout is observability-only.  We intentionally do NOT
+        // terminate the socket or trigger reconnection here because:
+        //
+        // 1. If the gateway process dies → child.on('exit') fires reliably.
+        // 2. If the socket disconnects  → ws.on('close') fires reliably.
+        // 3. If the gateway event loop is blocked (skills scanning, GC,
+        //    antivirus) → pong is delayed but the process and connection
+        //    are still valid.  Terminating the socket would cause a
+        //    cascading restart loop for no reason.
+        //
+        // The only scenario ping/pong could catch (silent half-open TCP on
+        // localhost) is practically impossible.  So we just log.
+        const pid = this.process?.pid ?? 'unknown';
         logger.warn(
-          `Gateway heartbeat timed out after ${consecutiveMisses} consecutive misses (timeout=${timeoutMs}ms); terminating stale socket`,
+          `Gateway heartbeat: ${consecutiveMisses} consecutive pong misses ` +
+            `(timeout=${timeoutMs}ms, pid=${pid}, state=${this.status.state}). ` +
+            `No action taken — relying on process exit and socket close events.`,
         );
-        try {
-          ws.terminate();
-        } catch (error) {
-          logger.warn('Failed to terminate stale Gateway socket after heartbeat timeout:', error);
-        }
-
-        // On Windows, onCloseAfterHandshake intentionally skips scheduleReconnect()
-        // to avoid double-reconnect races with the process exit handler.  However,
-        // a heartbeat timeout means the socket is stale while the process may still
-        // be alive (no exit event), so we must explicitly trigger reconnect here.
-        if (process.platform === 'win32') {
-          this.scheduleReconnect();
-        }
       },
     });
   }
@@ -979,6 +1068,7 @@ export class GatewayManager extends EventEmitter {
       try {
         // Use the guarded start() flow so reconnect attempts cannot bypass
         // lifecycle locking and accidentally start duplicate Gateway processes.
+        this.isAutoReconnectStart = true;
         await this.start();
         this.reconnectSuccessTotal += 1;
         this.emitReconnectMetric('success', {

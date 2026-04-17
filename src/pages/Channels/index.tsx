@@ -89,6 +89,9 @@ export function Channels() {
   const [existingAccountIdsForModal, setExistingAccountIdsForModal] = useState<string[]>([]);
   const [initialConfigValuesForModal, setInitialConfigValuesForModal] = useState<Record<string, string> | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const convergenceRefreshTimersRef = useRef<number[]>([]);
+  const fetchInFlightRef = useRef(false);
+  const queuedFetchOptionsRef = useRef<{ probe?: boolean } | null>(null);
 
   const displayedChannelTypes = getPrimaryChannels();
   const visibleChannelGroups = channelGroups;
@@ -96,12 +99,43 @@ export function Channels() {
   const hasStableValue = visibleChannelGroups.length > 0 || visibleAgents.length > 0;
   const isUsingStableValue = hasStableValue && (loading || Boolean(error));
 
-  const fetchPageData = useCallback(async () => {
-    setLoading(true);
+  // Use refs to read current state inside fetchPageData without making it
+  // a dependency — keeps the callback reference stable across renders so
+  // downstream useEffects don't re-execute every time data changes.
+  const channelGroupsRef = useRef(channelGroups);
+  channelGroupsRef.current = channelGroups;
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+
+  const mergeFetchOptions = (
+    base: { probe?: boolean } | null,
+    incoming: { probe?: boolean } | undefined,
+  ): { probe?: boolean } => {
+    return {
+      probe: Boolean(base?.probe) || Boolean(incoming?.probe),
+    };
+  };
+
+  const fetchPageData = useCallback(async (options?: { probe?: boolean }) => {
+    if (fetchInFlightRef.current) {
+      queuedFetchOptionsRef.current = mergeFetchOptions(queuedFetchOptionsRef.current, options);
+      return;
+    }
+    fetchInFlightRef.current = true;
+    const startedAt = Date.now();
+    const probe = options?.probe === true;
+    console.info(`[channels-ui] fetch start probe=${probe ? '1' : '0'}`);
+    // Only show loading spinner on first load (stale-while-revalidate).
+    const hasData = channelGroupsRef.current.length > 0 || agentsRef.current.length > 0;
+    if (!hasData) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [channelsRes, agentsRes] = await Promise.all([
-        hostApiFetch<{ success: boolean; channels?: ChannelGroupItem[]; error?: string }>('/api/channels/accounts'),
+        hostApiFetch<{ success: boolean; channels?: ChannelGroupItem[]; error?: string }>(
+          options?.probe ? '/api/channels/accounts?probe=1' : '/api/channels/accounts'
+        ),
         hostApiFetch<{ success: boolean; agents?: AgentItem[]; error?: string }>('/api/agents'),
       ]);
 
@@ -115,24 +149,89 @@ export function Channels() {
 
       setChannelGroups(channelsRes.channels || []);
       setAgents(agentsRes.agents || []);
+      console.info(
+        `[channels-ui] fetch ok probe=${probe ? '1' : '0'} elapsedMs=${Date.now() - startedAt} view=${(channelsRes.channels || []).map((item) => `${item.channelType}:${item.status}`).join(',')}`
+      );
     } catch (fetchError) {
+      // Preserve previous data on error — don't clear channelGroups/agents.
       setError(String(fetchError));
+      console.warn(
+        `[channels-ui] fetch fail probe=${probe ? '1' : '0'} elapsedMs=${Date.now() - startedAt} error=${String(fetchError)}`
+      );
     } finally {
+      fetchInFlightRef.current = false;
       setLoading(false);
+      const queued = queuedFetchOptionsRef.current;
+      if (queued) {
+        queuedFetchOptionsRef.current = null;
+        void fetchPageData(queued);
+      }
     }
+  // Stable reference — reads state via refs, no deps needed.
+   
   }, []);
+
+  const clearConvergenceRefreshTimers = useCallback(() => {
+    convergenceRefreshTimersRef.current.forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    convergenceRefreshTimersRef.current = [];
+  }, []);
+
+  const scheduleConvergenceRefresh = useCallback(() => {
+    clearConvergenceRefreshTimers();
+    // Channel adapters can take time to reconnect after gateway restart.
+    // First few rounds use probe=true to force runtime connectivity checks,
+    // then fall back to cached pulls to reduce load.
+    [
+      { delay: 1200, probe: true },
+      { delay: 2600, probe: false },
+      { delay: 4500, probe: false },
+      { delay: 7000, probe: false },
+      { delay: 10500, probe: false },
+    ].forEach(({ delay, probe }) => {
+      const timerId = window.setTimeout(() => {
+        void fetchPageData({ probe });
+      }, delay);
+      convergenceRefreshTimersRef.current.push(timerId);
+    });
+  }, [clearConvergenceRefreshTimers, fetchPageData]);
 
   useEffect(() => {
     void fetchPageData();
   }, [fetchPageData]);
 
   useEffect(() => {
+    return () => {
+      clearConvergenceRefreshTimers();
+    };
+  }, [clearConvergenceRefreshTimers]);
+
+  useEffect(() => {
+    // Throttle channel-status events to avoid flooding fetchPageData during AI tasks.
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+    let pending = false;
+
     const unsubscribe = subscribeHostEvent('gateway:channel-status', () => {
+      if (throttleTimer) {
+        pending = true;
+        return;
+      }
       void fetchPageData();
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        if (pending) {
+          pending = false;
+          void fetchPageData();
+        }
+      }, 2000);
     });
     return () => {
       if (typeof unsubscribe === 'function') {
         unsubscribe();
+      }
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
       }
     };
   }, [fetchPageData]);
@@ -143,8 +242,9 @@ export function Channels() {
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
       void fetchPageData();
+      scheduleConvergenceRefresh();
     }
-  }, [fetchPageData, gatewayStatus.state]);
+  }, [fetchPageData, gatewayStatus.state, scheduleConvergenceRefresh]);
 
   const configuredTypes = useMemo(
     () => visibleChannelGroups.map((group) => group.channelType),
@@ -166,7 +266,7 @@ export function Channels() {
   const unsupportedGroups = displayedChannelTypes.filter((type) => !configuredTypes.includes(type));
 
   const handleRefresh = () => {
-    void fetchPageData();
+    void fetchPageData({ probe: true });
   };
 
   const handleBindAgent = async (channelType: string, accountId: string, agentId: string) => {
@@ -492,7 +592,8 @@ export function Channels() {
             setInitialConfigValuesForModal(undefined);
           }}
           onChannelSaved={async () => {
-            await fetchPageData();
+            await fetchPageData({ probe: true });
+            scheduleConvergenceRefresh();
             setShowConfigModal(false);
             setSelectedChannelType(null);
             setSelectedAccountId(undefined);

@@ -2,7 +2,7 @@
  * Login Page
  * User authentication entry point - state stored in memory only
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { TitleBar } from '@/components/layout/TitleBar';
@@ -14,6 +14,13 @@ import { useAuthStore } from '@/stores/auth';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import clawxIcon from '@/assets/logo.svg';
+import { Verify, type VerifyRef } from '@/pages/Login/verifition';
+
+interface PendingLogin {
+  username: string;
+  password: string;
+  isRemember: boolean;
+}
 
 export function Login() {
   const { t } = useTranslation('login');
@@ -24,6 +31,9 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [isRemember, setIsRemember] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [showCaptcha, setShowCaptcha] = useState(false);
+  const pendingLoginRef = useRef<PendingLogin | null>(null);
+  const verifyRef = useRef<VerifyRef>(null);
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -39,20 +49,39 @@ export function Login() {
       return;
     }
 
+    // Save credentials and show captcha
+    pendingLoginRef.current = {
+      username: username.trim(),
+      password: password.trim(),
+      isRemember,
+    };
+    setShowCaptcha(true);
+  };
+
+  const handleCaptchaSuccess = async (result: { captchaVerification: string }) => {
+    const pending = pendingLoginRef.current;
+    if (!pending) return;
+
     setIsLoading(true);
-
-    // Simulate a brief loading state for better UX
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
     try {
-      await login(username.trim(), password.trim(), isRemember);
-      // Navigation will be handled by the useEffect above
+      await login(
+        pending.username,
+        pending.password,
+        pending.isRemember,
+        result.captchaVerification
+      );
     } catch (err) {
       console.error('Login failed:', err);
       toast.error(String(err));
+      setShowCaptcha(false)
     } finally {
       setIsLoading(false);
+      pendingLoginRef.current = null;
     }
+  };
+
+  const handleCaptchaError = () => {
+    // pendingLoginRef.current = null;
   };
 
   const baseUrl = import.meta.env.VITE_BASE_URL;
@@ -63,10 +92,10 @@ export function Login() {
     try {
       let returnUrl = `${baseUrl}/#/loginRedirect`;
       const encodeUrl = encodeURIComponent(returnUrl);
-      const randomVal = String(Math.random())
+      const randomVal = String(Math.random());
       setLoginToken(randomVal);
       console.log(`[SSO] Login token: ${loginToken}`);
-      localStorage.setItem("loginToken", randomVal);
+      localStorage.setItem('loginToken', randomVal);
       location.href = `${baseUrl}/sso/ssoLoginPage?returnUrl=${encodeUrl}&loginToken=${randomVal}`;
     } catch (error) {
       console.error('Failed to open external browser:', error);
@@ -76,18 +105,23 @@ export function Login() {
   };
 
   const getLoginStatus = () => {
-    const loginToken = localStorage.getItem("loginToken");
+    const loginToken = localStorage.getItem('loginToken');
     if (loginToken) {
       ssoLoginStatus(loginToken).then((res: any) => {
-        if (res === "1") {
-          localStorage.setItem("loginToken", "");
+        if (res === '1') {
+          localStorage.setItem('loginToken', '');
           navigate('/');
         }
-      });
+      }).catch(err => {
+        localStorage.setItem('loginToken', '');
+        toast.error(String(err));
+      })
     }
   };
-  getLoginStatus()
-
+  useEffect(() => {
+    getLoginStatus();
+  }, [])
+  
   return (
     <div className="relative flex h-screen flex-col overflow-hidden bg-background bg-[#f7f9fb]">
       {/* Background Spheres */}
@@ -132,82 +166,126 @@ export function Login() {
           </div>
 
           {/* Login Card */}
-          <Card className="w-full border shadow-lg">
-            <CardContent className="space-y-6 p-6">
-              {/* SSO Login Button */}
-              <Button className="w-full h-11 bg-[#7657FF] text-white" onClick={handleSSOLogin}>
-                {t('ssoLogin')}
-              </Button>
-
-              {/* Divider */}
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <span className="w-full border-t" />
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-card px-2 text-muted-foreground">
-                    {t('orDivider')}
-                    {t('accountPasswordLogin')}
-                  </span>
-                </div>
-              </div>
-
-              {/* Login Form */}
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="username" className="flex items-center gap-2">
-                    {t('usernameLabel')}
-                  </Label>
-                  <Input
-                    id="username"
-                    type="text"
-                    placeholder={t('usernamePlaceholder')}
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    autoComplete="username"
-                    className="h-11"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="password" className="flex items-center gap-2">
-                    {t('passwordLabel')}
-                  </Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    placeholder={t('passwordPlaceholder')}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    autoComplete="current-password"
-                    className="h-11"
-                  />
-                </div>
-
-                {/* Remember Me */}
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="remember"
-                    checked={isRemember}
-                    onChange={(e) => setIsRemember(e.target.checked)}
-                    className="h-4 w-4 rounded border border-primary text-primary focus:ring-primary cursor-pointer"
-                  />
-                  <Label htmlFor="remember" className="text-sm font-normal cursor-pointer">
-                    {t('rememberMe')}
-                  </Label>
-                </div>
-
-                {/* Login Button */}
-                <Button
-                  type="submit"
-                  className="w-full h-11"
-                  disabled={!username.trim() || !password.trim() || isLoading}
-                >
-                  {isLoading ? t('loggingIn') : t('loginButton')}
+          <Card className="w-full border shadow-lg min-h-[400]">
+            {!showCaptcha && (
+              <CardContent className="space-y-6 p-6">
+                {/* SSO Login Button */}
+                <Button className="w-full h-11 bg-[#7657FF] text-white" onClick={handleSSOLogin}>
+                  {t('ssoLogin')}
                 </Button>
-              </form>
-            </CardContent>
+
+                {/* Divider */}
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <span className="w-full border-t" />
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-card px-2 text-muted-foreground">
+                      {t('orDivider')}
+                      {t('accountPasswordLogin')}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Login Form */}
+                <form onSubmit={handleSubmit} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="username" className="flex items-center gap-2">
+                      {t('usernameLabel')}
+                    </Label>
+                    <Input
+                      id="username"
+                      type="text"
+                      placeholder={t('usernamePlaceholder')}
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      autoComplete="username"
+                      className="h-11"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="password" className="flex items-center gap-2">
+                      {t('passwordLabel')}
+                    </Label>
+                    <Input
+                      id="password"
+                      type="password"
+                      placeholder={t('passwordPlaceholder')}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      autoComplete="current-password"
+                      className="h-11"
+                    />
+                  </div>
+
+                  {/* Remember Me */}
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="remember"
+                      checked={isRemember}
+                      onChange={(e) => setIsRemember(e.target.checked)}
+                      className="h-4 w-4 rounded border border-primary text-primary focus:ring-primary cursor-pointer"
+                    />
+                    <Label htmlFor="remember" className="text-sm font-normal cursor-pointer">
+                      {t('rememberMe')}
+                    </Label>
+                  </div>
+
+                  {/* Login Button */}
+                  <Button
+                    type="submit"
+                    className="w-full h-11"
+                    disabled={!username.trim() || !password.trim() || isLoading}
+                  >
+                    {isLoading ? t('loggingIn') : t('loginButton')}
+                  </Button>
+                </form>
+              </CardContent>
+            )}
+            {showCaptcha && (
+              <CardContent className="space-y-4 p-6">
+                {/* Captcha header */}
+                <div className="validate-box-header flex items-center justify-between border-b pb-3">
+                  <h3 className="text-base font-medium text-foreground">请完成安全验证</h3>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <span className="tip-text">拖动下方滑块完成拼图</span>
+                    <button
+                      type="button"
+                      title="刷新验证"
+                      onClick={() => verifyRef.current?.refresh()}
+                      className="cursor-pointer rounded p-1 hover:bg-muted transition-colors"
+                    >
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M21 2v6h-6" />
+                        <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                        <path d="M3 22v-6h6" />
+                        <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                {/* Captcha Verification */}
+                <Verify
+                  ref={verifyRef}
+                  captchaType="blockPuzzle"
+                  mode="fixed"
+                  imgSize={{ width: '330px', height: '150px' }}
+                  onSuccess={handleCaptchaSuccess}
+                  onError={handleCaptchaError}
+                />
+              </CardContent>
+            )}
           </Card>
 
           {/* Footer - Create Account */}

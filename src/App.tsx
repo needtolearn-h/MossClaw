@@ -196,9 +196,9 @@ function App() {
           {/* Setup wizard (shown on first launch) */}
           <Route path="/setup/*" element={<Setup />} />
           <Route path="/login" element={<Login />} />
-
+          {/* 新增判断，如果没有登录，则不展示登录页外的数据 */}
           {/* Main application routes */}
-          <Route element={<MainLayout />}>
+          {isAuthenticated ? <Route element={<MainLayout />}>
             <Route path="/" element={<Chat />} />
             <Route path="/models" element={<Models />} />
             <Route path="/agents" element={<Agents />} />
@@ -206,7 +206,7 @@ function App() {
             <Route path="/skills" element={<Skills />} />
             <Route path="/cron" element={<Cron />} />
             <Route path="/settings/*" element={<Settings />} />
-          </Route>
+          </Route> : null}
         </Routes>
 
         {/* Global toast notifications */}
