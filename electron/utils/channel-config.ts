@@ -592,9 +592,9 @@ function transformChannelConfig(
 
     if (channelType === 'feishu' || channelType === 'wecom') {
         const existingDmPolicy = existingAccountConfig.dmPolicy === 'pairing' ? 'open' : existingAccountConfig.dmPolicy;
-        transformedConfig.dmPolicy = transformedConfig.dmPolicy ?? existingDmPolicy ?? 'open';
+        transformedConfig.dmPolicy = transformedConfig.dmPolicy ?? existingDmPolicy ?? 'pairing';
 
-        let allowFrom = (transformedConfig.allowFrom ?? existingAccountConfig.allowFrom ?? ['*']) as string[];
+        let allowFrom = (transformedConfig.allowFrom ?? existingAccountConfig.allowFrom ?? []) as string[];
         if (!Array.isArray(allowFrom)) {
             allowFrom = [allowFrom] as string[];
         }

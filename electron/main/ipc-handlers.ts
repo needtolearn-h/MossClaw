@@ -22,6 +22,7 @@ import {
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { buildOpenClawControlUiUrl } from '../utils/openclaw-control-ui';
 import { logger } from '../utils/logger';
+import { approvePairing } from '../utils/openclaw-pairing';
 import { resolveAgentIdFromChannel } from '../utils/agent-config';
 import { resolveAccountIdFromSessionHistory } from '../utils/session-util';
 import {
@@ -1210,6 +1211,41 @@ function registerGatewayHandlers(
   // Gateway RPC call
   ipcMain.handle('gateway:rpc', async (_, method: string, params?: unknown, timeoutMs?: number) => {
     try {
+      // Check if this is a pairing command via gateway:rpc
+      if (method === 'chat.send' && params && typeof params === 'object' && 'message' in params) {
+        const message = (params as Record<string, unknown>).message as string;
+        const pairingMatch = message.trim().match(/^\/pairing\s+(\w+)\s+(\S+)$/i);
+        logger.info(`[pairingMatch] --- ${pairingMatch}`);
+        if (pairingMatch) {
+          const channel = pairingMatch[1].toLowerCase();
+          const code = pairingMatch[2].trim();
+
+          // Execute pairing command
+          const pairingResult = await approvePairing(channel, code, {notify: true});
+          logger.info(`[pairingResult] --- ${pairingResult}`);
+
+          // Return pairing result to frontend
+          return {
+            success: pairingResult.success,
+            result: {
+              isPairingCommand: true,
+              pairingResult: pairingResult.success
+                ? {
+                    success: true,
+                    request: {
+                      channel,
+                      code,
+                    },
+                  }
+                : {
+                    success: false,
+                    error: pairingResult.error,
+                  },
+            },
+          };
+        }
+      }
+
       const result = await gatewayManager.rpc(method, params, timeoutMs);
       return { success: true, result };
     } catch (error) {
@@ -1473,6 +1509,18 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     logger.info(`Scheduling Gateway reload after ${reason}`);
     gatewayManager.debouncedReload(150);
   };
+
+  // Approve pairing request
+  ipcMain.handle('openclaw:approvePairing', async (_, channel: string, code: string) => {
+    try {
+      const result = await approvePairing(channel, code);
+      logger.info(`[openclaw:approvePairing] Result: ${JSON.stringify(result)}`);
+      return result;
+    } catch (error) {
+      logger.error('[openclaw:approvePairing] Failed:', error);
+      return { success: false, error: String(error) };
+    }
+  });
 
   // Get OpenClaw package status
   ipcMain.handle('openclaw:status', () => {

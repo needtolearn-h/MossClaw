@@ -1738,44 +1738,106 @@ export const useChatStore = create<ChatState>((set, get) => ({
         saveImageCache(_imageCache);
       }
 
-      let result: { success: boolean; result?: { runId?: string }; error?: string };
+      let result: {
+        success: boolean;
+        result?: {
+          runId?: string;
+          isPairingCommand?: boolean;
+          pairingResult?: {
+            success: boolean;
+            request?: { channel: string; senderId: string; code: string; senderName?: string };
+            error?: string;
+          };
+        };
+        error?: string;
+      };
 
       // Longer timeout for chat sends to tolerate high-latency networks (avoids connect error)
       const CHAT_SEND_TIMEOUT_MS = 120_000;
 
       if (hasMedia) {
-        result = await hostApiFetch<{ success: boolean; result?: { runId?: string }; error?: string }>(
-          '/api/chat/send-with-media',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionKey: currentSessionKey,
-              message: trimmed || 'Process the attached file(s).',
-              deliver: false,
-              idempotencyKey,
-              media: attachments.map((a) => ({
-                filePath: a.stagedPath,
-                mimeType: a.mimeType,
-                fileName: a.fileName,
-              })),
-            }),
-          },
-        );
-      } else {
-        const rpcResult = await useGatewayStore.getState().rpc<{ runId?: string }>(
-          'chat.send',
-          {
+        result = await hostApiFetch<{
+          success: boolean;
+          result?: {
+            runId?: string;
+            isPairingCommand?: boolean;
+            pairingResult?: {
+              success: boolean;
+              request?: { channel: string; senderId: string; code: string; senderName?: string };
+              error?: string;
+            };
+          };
+          error?: string;
+        }>('/api/chat/send-with-media', {
+          method: 'POST',
+          body: JSON.stringify({
             sessionKey: currentSessionKey,
-            message: trimmed,
+            message: trimmed || 'Process the attached file(s).',
             deliver: false,
             idempotencyKey,
-          },
-          CHAT_SEND_TIMEOUT_MS,
-        );
+            media: attachments.map((a) => ({
+              filePath: a.stagedPath,
+              mimeType: a.mimeType,
+              fileName: a.fileName,
+            })),
+          }),
+        });
+      } else {
+        const rpcResult = await useGatewayStore
+          .getState()
+          .rpc<{
+            runId?: string;
+            isPairingCommand?: boolean;
+            pairingResult?: {
+              success: boolean;
+              request?: { channel: string; senderId: string; code: string; senderName?: string };
+              error?: string;
+            };
+          }>(
+            'chat.send',
+            {
+              sessionKey: currentSessionKey,
+              message: trimmed,
+              deliver: false,
+              idempotencyKey,
+            },
+            CHAT_SEND_TIMEOUT_MS
+          );
         result = { success: true, result: rpcResult };
       }
 
-      console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
+      console.log(
+        `[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`
+      );
+
+      console.log()
+
+      // 处理配对命令的响应
+      if (result.result?.isPairingCommand) {
+        const pairingResult = result.result.pairingResult;
+
+        // 移除刚才添加的用户命令消息
+        set((s) => ({
+          messages: s.messages.slice(0, -1),
+          sending: false,
+        }));
+
+        // 添加系统消息显示配对结果
+        const systemMsg: RawMessage = {
+          role: 'system',
+          content: pairingResult?.success
+            ? `✅ 配对成功！已批准 ${pairingResult.request?.channel} 频道的配对请求。`
+            : `❌ 配对失败：${pairingResult?.error === 'no_pending_requests' ? '没有待处理的配对请求' : pairingResult?.error}`,
+          timestamp: Date.now() / 1000,
+          id: crypto.randomUUID(),
+        };
+
+        set((s) => ({
+          messages: [...s.messages, systemMsg],
+        }));
+
+        return;
+      }
 
       if (!result.success) {
         const errorMsg = result.error || 'Failed to send message';

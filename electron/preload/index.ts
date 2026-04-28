@@ -137,6 +137,7 @@ const electronAPI = {
         'openclaw:getConfigDir',
         'openclaw:getSkillsDir',
         'openclaw:getCliCommand',
+        'openclaw:approvePairing',
         // login
         'show-login',
       ];
