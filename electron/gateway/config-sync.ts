@@ -18,7 +18,7 @@ function fsPath(filePath: string): string {
 import { getAllSettings } from '../utils/store';
 import { getApiKey, getDefaultProvider, getProvider } from '../utils/secure-storage';
 import { getProviderEnvVar, getKeyableProviderTypes } from '../utils/provider-registry';
-import { getOpenClawDir, getOpenClawEntryPath, isOpenClawPresent } from '../utils/paths';
+import { getOpenClawPluginStageDir, getOpenClawRuntimeDir, getOpenClawRuntimeEntryPath, isOpenClawPresent } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
 import { sanitizeOpenClawConfig, batchSyncConfigFields } from '../utils/openclaw-auth';
@@ -28,12 +28,14 @@ import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
 import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe } from '../utils/plugin-install';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
+import { cleanupAgentsSymlinkedSkills } from './skills-symlink-cleanup';
 
 
 export interface GatewayLaunchContext {
   appSettings: Awaited<ReturnType<typeof getAllSettings>>;
   openclawDir: string;
   entryScript: string;
+  pluginStageDir: string | null;
   gatewayArgs: string[];
   forkEnv: Record<string, string | undefined>;
   mode: 'dev' | 'packaged';
@@ -85,6 +87,25 @@ function readPluginVersion(pkgJsonPath: string): string | null {
   }
 }
 
+function collectPluginRuntimeDeps(pluginDir: string): string[] {
+  try {
+    const raw = readFileSync(fsPath(join(pluginDir, 'package.json')), 'utf-8');
+    const pkg = JSON.parse(raw) as { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> };
+    return Object.keys({
+      ...pkg.dependencies,
+      ...pkg.optionalDependencies,
+    });
+  } catch {
+    return [];
+  }
+}
+
+function hasPluginRuntimeDeps(pluginDir: string): boolean {
+  const deps = collectPluginRuntimeDeps(pluginDir);
+  if (deps.length === 0) return true;
+  return deps.every((depName) => existsSync(fsPath(join(pluginDir, 'node_modules', ...depName.split('/'), 'package.json'))));
+}
+
 function buildBundledPluginSources(pluginDirName: string): string[] {
   return app.isPackaged
     ? [
@@ -121,7 +142,7 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
     if (bundledDir) {
       const sourceVersion = readPluginVersion(join(bundledDir, 'package.json'));
       // Install or upgrade if version differs or plugin not installed
-      if (!isInstalled || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
+      if (!isInstalled || !hasPluginRuntimeDeps(targetDir) || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
         logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (bundled)`);
         try {
           mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
@@ -165,6 +186,31 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
 }
 
 /**
+ * Remove channel plugin extensions from ~/.openclaw/extensions/ when their
+ * corresponding channel is no longer configured.  This prevents the Gateway
+ * from scanning residual plugin manifests that were installed by a previous
+ * configuration but are no longer needed.
+ */
+function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): void {
+  const configuredSet = new Set(configuredChannels);
+
+  for (const [channelType, pluginInfo] of Object.entries(CHANNEL_PLUGIN_MAP)) {
+    if (configuredSet.has(channelType)) continue;
+
+    const { dirName } = pluginInfo;
+    const targetDir = join(homedir(), '.openclaw', 'extensions', dirName);
+    if (!existsSync(fsPath(targetDir))) continue;
+
+    logger.info(`[plugin] Removing unconfigured channel plugin: ${channelType} (${dirName})`);
+    try {
+      rmSync(fsPath(targetDir), { recursive: true, force: true });
+    } catch (err) {
+      logger.warn(`[plugin] Failed to remove unconfigured channel plugin ${channelType}:`, err);
+    }
+  }
+}
+
+/**
  * Ensure extension-specific packages are resolvable from shared dist/ chunks.
  *
  * OpenClaw's Rollup bundler creates shared chunks in dist/ (e.g.
@@ -198,8 +244,29 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
   const topNM = join(openclawDir, 'node_modules');
   let linkedCount = 0;
 
+  // Use 'junction' on Windows (no admin required); on other platforms the
+  // type argument is ignored by Node so 'junction' is harmless.
+  const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
+
   try {
     if (!existsSync(extDir)) return;
+
+    // Create openclaw self-reference so built-in extension runtime files can
+    // resolve bare `import 'openclaw/plugin-sdk/...'` via native ESM.
+    // Extensions ship their own package.json (e.g. "@openclaw/codex"),
+    // creating a separate package scope that prevents Node's ESM
+    // package-self-reference from reaching the openclaw root package.
+    // Only needed in packaged mode — in dev pnpm already provides resolution.
+    if (app.isPackaged) {
+      const selfRef = join(topNM, 'openclaw');
+      if (!existsSync(selfRef)) {
+        try {
+          mkdirSync(topNM, { recursive: true });
+          symlinkSync(openclawDir, selfRef, symlinkType);
+          linkedCount++;
+        } catch { /* skip on error — non-fatal */ }
+      }
+    }
 
     for (const ext of readdirSync(extDir, { withFileTypes: true })) {
       if (!ext.isDirectory()) continue;
@@ -220,7 +287,7 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
             if (existsSync(dest)) continue;
             try {
               mkdirSync(join(topNM, pkg.name), { recursive: true });
-              symlinkSync(join(scopeDir, sub.name), dest);
+              symlinkSync(join(scopeDir, sub.name), dest, symlinkType);
               linkedCount++;
             } catch { /* skip on error — non-fatal */ }
           }
@@ -229,7 +296,7 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
           if (existsSync(dest)) continue;
           try {
             mkdirSync(topNM, { recursive: true });
-            symlinkSync(join(extNM, pkg.name), dest);
+            symlinkSync(join(extNM, pkg.name), dest, symlinkType);
             linkedCount++;
           } catch { /* skip on error — non-fatal */ }
         }
@@ -278,38 +345,27 @@ export async function syncGatewayConfigBeforeLaunch(
     logger.warn('Failed to clean stale built-in extensions:', err);
   }
 
+  // Remove stray symlinks under ~/.openclaw/skills whose realpath resolves
+  // inside ~/.agents/skills.  OpenClaw's hardened skill loader rejects these
+  // on every launch (reason=symlink-escape) and the underlying skills are
+  // still discovered via the agents-skills-personal source, so the symlinks
+  // are pure log noise.  Transitional workaround for openclaw/openclaw#59219.
+  try {
+    cleanupAgentsSymlinkedSkills();
+  } catch (err) {
+    logger.warn('Failed to clean .agents/skills-targeted skill symlinks:', err);
+  }
+
   // Auto-upgrade installed plugins before Gateway starts so that
   // the plugin manifest ID matches what sanitize wrote to the config.
-  // Read config once and reuse for both listConfiguredChannels and plugins.allow.
+  // Only install/upgrade plugins for channels that are actually configured
+  // in openclaw.json — do NOT expand the list from plugins.allow.
   try {
     const rawCfg = await readOpenClawConfig();
     const configuredChannels = await listConfiguredChannelsFromConfig(rawCfg);
 
-    // Also ensure plugins referenced in plugins.allow are installed even if
-    // they have no channels.X section yet (e.g. qqbot added via plugins.allow
-    // but never fully saved through ClawX UI).
-    try {
-      const allowList = Array.isArray(rawCfg.plugins?.allow) ? (rawCfg.plugins!.allow as string[]) : [];
-      const pluginIdToChannel: Record<string, string> = {};
-      for (const [channelType, info] of Object.entries(CHANNEL_PLUGIN_MAP)) {
-        pluginIdToChannel[info.dirName] = channelType;
-      }
-
-      pluginIdToChannel['openclaw-lark'] = 'feishu';
-      pluginIdToChannel['feishu-openclaw-plugin'] = 'feishu';
-
-      for (const pluginId of allowList) {
-        const channelType = pluginIdToChannel[pluginId] ?? pluginId;
-        if (CHANNEL_PLUGIN_MAP[channelType] && !configuredChannels.includes(channelType)) {
-          configuredChannels.push(channelType);
-        }
-      }
-
-    } catch (err) {
-      logger.warn('[plugin] Failed to augment channel list from plugins.allow:', err);
-    }
-
     ensureConfiguredPluginsUpgraded(configuredChannels);
+    cleanupUnconfiguredChannelPlugins(configuredChannels);
   } catch (err) {
     logger.warn('Failed to auto-upgrade plugins:', err);
   }
@@ -391,8 +447,9 @@ async function resolveChannelStartupPolicy(): Promise<{
 }
 
 export async function prepareGatewayLaunchContext(port: number): Promise<GatewayLaunchContext> {
-  const openclawDir = getOpenClawDir();
-  const entryScript = getOpenClawEntryPath();
+  const openclawDir = getOpenClawRuntimeDir();
+  const entryScript = getOpenClawRuntimeEntryPath();
+  const pluginStageDir = getOpenClawPluginStageDir(openclawDir);
 
   if (!isOpenClawPresent()) {
     throw new Error(`OpenClaw package not found at: ${openclawDir}`);
@@ -439,6 +496,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     OPENCLAW_SKIP_CHANNELS: skipChannels ? '1' : '',
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',
+    ...(pluginStageDir ? { OPENCLAW_PLUGIN_STAGE_DIR: pluginStageDir } : {}),
   };
 
   // Ensure extension-specific packages (e.g. grammy from the telegram
@@ -450,6 +508,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     appSettings,
     openclawDir,
     entryScript,
+    pluginStageDir,
     gatewayArgs,
     forkEnv,
     mode,

@@ -23,6 +23,12 @@ let _historyPollTimer: ReturnType<typeof setTimeout> | null = null;
 // before committing the error to give the recovery path a chance.
 let _errorRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Track the last run ID that was explicitly aborted by the user.
+// Prevents lingering Gateway events from the aborted run from re-arming
+// the sending state after abortRun clears it.
+let _lastAbortedRunId: string | null = null;
+const _blockedRunEvents = new Map<string, Record<string, unknown>[]>();
+
 function clearErrorRecoveryTimer(): void {
   if (_errorRecoveryTimer) {
     clearTimeout(_errorRecoveryTimer);
@@ -70,6 +76,155 @@ function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
 
 const _imageCache = loadImageCache();
 
+function normalizeBlockText(text: string | undefined): string {
+  return typeof text === 'string' ? text.replace(/\r\n/g, '\n').trim() : '';
+}
+
+function compactProgressiveTextParts(parts: string[]): string[] {
+  const compacted: string[] = [];
+
+  for (const part of parts) {
+    const current = normalizeBlockText(part);
+    if (!current) continue;
+
+    const previous = compacted.at(-1);
+    if (!previous) {
+      compacted.push(part);
+      continue;
+    }
+
+    const normalizedPrevious = normalizeBlockText(previous);
+    if (!normalizedPrevious) {
+      compacted[compacted.length - 1] = part;
+      continue;
+    }
+
+    if (current === normalizedPrevious || normalizedPrevious.startsWith(current)) {
+      continue;
+    }
+
+    if (current.startsWith(normalizedPrevious)) {
+      compacted[compacted.length - 1] = part;
+      continue;
+    }
+
+    compacted.push(part);
+  }
+
+  return compacted;
+}
+
+function normalizeLiveContentBlocks(content: ContentBlock[]): ContentBlock[] {
+  return content.map((block) => ({ ...block }));
+}
+
+function normalizeStreamingMessage(message: unknown): unknown {
+  if (!message || typeof message !== 'object') return message;
+
+  const rawMessage = message as RawMessage;
+  const rawContent = rawMessage.content;
+  if (!Array.isArray(rawContent)) return rawMessage;
+
+  const normalizedContent = normalizeLiveContentBlocks(rawContent as ContentBlock[]);
+  const didChange = normalizedContent.some((block, index) => block !== rawContent[index])
+    || normalizedContent.length !== rawContent.length;
+
+  return didChange
+    ? { ...rawMessage, content: normalizedContent }
+    : rawMessage;
+}
+
+/**
+ * Strip Gateway-injected metadata that does NOT exist on the renderer's
+ * optimistic user message but is echoed back when the Gateway persists it:
+ *   - leading timestamp `[Wed 2026-04-22 10:30 GMT+8] `
+ *   - `[message_id: uuid]` tags sprinkled throughout the text
+ *   - `[media attached: path (mime) | path]` references appended when the
+ *     renderer sends attachments via `chat:sendWithMedia`
+ *   - Gateway-injected "Conversation info (untrusted metadata): ..." blocks
+ *
+ * Keeping this aligned with `cleanUserText` in `pages/Chat/message-utils.ts`
+ * is important: the user bubble renders the cleaned text, so the comparison
+ * used to dedupe optimistic vs server echoes must operate on the same
+ * cleaned form — otherwise the same visible message renders twice.
+ */
+function stripGatewayUserMetadata(text: string): string {
+  return text
+    .replace(/^\s*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
+    .replace(/\s*\[media attached:[^\]]*\]/g, '')
+    .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
+    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
+    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '');
+}
+
+function normalizeComparableUserText(content: unknown): string {
+  return stripGatewayUserMetadata(getMessageText(content))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getComparableAttachmentSignature(message: Pick<RawMessage, '_attachedFiles'>): string {
+  const files = (message._attachedFiles || [])
+    .map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`)
+    .filter(Boolean)
+    .sort();
+  return files.join('::');
+}
+
+function matchesOptimisticUserMessage(
+  candidate: RawMessage,
+  optimistic: RawMessage,
+  optimisticTimestampMs: number,
+): boolean {
+  if (candidate.role !== 'user') return false;
+
+  const optimisticText = normalizeComparableUserText(optimistic.content);
+  const candidateText = normalizeComparableUserText(candidate.content);
+  const sameText = optimisticText.length > 0 && optimisticText === candidateText;
+
+  const optimisticAttachments = getComparableAttachmentSignature(optimistic);
+  const candidateAttachments = getComparableAttachmentSignature(candidate);
+  const sameAttachments = optimisticAttachments.length > 0 && optimisticAttachments === candidateAttachments;
+
+  const hasOptimisticTimestamp = Number.isFinite(optimisticTimestampMs) && optimisticTimestampMs > 0;
+  const hasCandidateTimestamp = candidate.timestamp != null;
+  const timestampMatches = hasOptimisticTimestamp && hasCandidateTimestamp
+    ? Math.abs(toMs(candidate.timestamp as number) - optimisticTimestampMs) < 5000
+    : false;
+
+  if (sameText && sameAttachments) return true;
+  if (sameText && (!optimisticAttachments || !candidateAttachments) && (timestampMatches || !hasCandidateTimestamp)) return true;
+  if (sameAttachments && (!optimisticText || !candidateText) && (timestampMatches || !hasCandidateTimestamp)) return true;
+  return false;
+}
+
+function snapshotStreamingAssistantMessage(
+  currentStream: RawMessage | null,
+  existingMessages: RawMessage[],
+  runId: string,
+): RawMessage[] {
+  if (!currentStream) return [];
+
+  const normalizedStream = normalizeStreamingMessage(currentStream) as RawMessage;
+  const streamRole = normalizedStream.role;
+  if (streamRole !== 'assistant' && streamRole !== undefined) return [];
+
+  const snapId = normalizedStream.id || `${runId || 'run'}-turn-${existingMessages.length}`;
+  if (existingMessages.some((message) => message.id === snapId)) return [];
+
+  return [{
+    ...normalizedStream,
+    role: 'assistant',
+    id: snapId,
+  }];
+}
+
+function getLatestOptimisticUserMessage(messages: RawMessage[], userTimestampMs: number): RawMessage | undefined {
+  return [...messages].reverse().find(
+    (message) => message.role === 'user' && (!message.timestamp || Math.abs(toMs(message.timestamp) - userTimestampMs) < 5000),
+  );
+}
+
 function upsertImageCacheEntry(filePath: string, file: Omit<AttachedFileMeta, 'filePath'>): void {
   _imageCache.set(filePath, { ...file, filePath });
   saveImageCache(_imageCache);
@@ -86,12 +241,36 @@ function withAttachedFileSource(
 function getMessageText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return (content as Array<{ type?: string; text?: string }>)
+    const parts = (content as Array<{ type?: string; text?: string }>)
       .filter(b => b.type === 'text' && b.text)
-      .map(b => b.text!)
-      .join('\n');
+      .map(b => b.text!);
+    return compactProgressiveTextParts(parts).join('\n');
   }
   return '';
+}
+
+function getMessageStopReason(message: RawMessage | unknown): string | null {
+  if (!message || typeof message !== 'object') return null;
+  const msg = message as Record<string, unknown>;
+  const rawStopReason = msg.stopReason ?? msg.stop_reason;
+  if (typeof rawStopReason !== 'string') return null;
+  const normalized = rawStopReason.trim().toLowerCase();
+  return normalized || null;
+}
+
+function getMessageErrorMessage(message: RawMessage | unknown): string | null {
+  if (!message || typeof message !== 'object') return null;
+  const msg = message as Record<string, unknown>;
+  const rawError = msg.errorMessage ?? msg.error_message;
+  if (typeof rawError !== 'string') return null;
+  const normalized = rawError.trim();
+  return normalized || null;
+}
+
+function isTerminalAssistantErrorMessage(message: RawMessage | unknown): boolean {
+  if (!message || typeof message !== 'object') return false;
+  const msg = message as Record<string, unknown>;
+  return msg.role === 'assistant' && getMessageStopReason(message) === 'error';
 }
 
 /** Extract media file refs from [media attached: <path> (<mime>) | ...] patterns */
@@ -611,9 +790,46 @@ function isToolResultRole(role: unknown): boolean {
 /** True for internal plumbing messages that should never be shown in the UI. */
 function isInternalMessage(msg: { role?: unknown; content?: unknown }): boolean {
   if (msg.role === 'system') return true;
+  const text = getMessageText(msg.content);
   if (msg.role === 'assistant') {
-    const text = getMessageText(msg.content);
     if (/^(HEARTBEAT_OK|NO_REPLY)\s*$/.test(text)) return true;
+  }
+  // Runtime system injections: these arrive as user or assistant-role messages
+  // but are internal plumbing (exec results, async-command notices, time pings, etc.)
+  if ((msg.role === 'user' || msg.role === 'assistant') && isRuntimeSystemInjection(text)) return true;
+  return false;
+}
+
+/**
+ * Detect runtime-injected system messages that should be hidden from the chat UI.
+ * These are injected by the OpenClaw runtime as user-role messages and include:
+ *   - "System (untrusted): ..." — exec results, tool output, etc.
+ *   - "An async command you ran earlier has completed" — async completion notices
+ *   - "Current time: ..." followed by nothing else — periodic heartbeat time pings
+ *   - "Handle the result internally. Do not relay it to the user" — internal directives
+ */
+function isRuntimeSystemInjection(text: string): boolean {
+  if (!text) return false;
+  const normalized = text.trim();
+  // "System (untrusted): ..." at the start (with optional leading whitespace)
+  if (/^\s*System\s*\(untrusted\)\s*:/i.test(normalized)) return true;
+
+  // Async command completion notice + internal relay directive commonly arrive together.
+  // Require both markers to avoid hiding normal conversational text that quotes one phrase.
+  if (
+    /An async command you ran earlier has completed/i.test(normalized)
+    && /Do not relay it to the user unless explicitly requested/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  // Standalone time injection (e.g. "Current time: Wednesday, April 22nd, 2026 - 10:06 (Asia/Shanghai) / 2026-04-22 02:06 UTC")
+  // Only match when the full message is the time announcement.
+  if (
+    /^\s*Current time\s*:/i.test(normalized)
+    && /^\s*Current time\s*:[^\n]*\/\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\s*$/i.test(normalized)
+  ) {
+    return true;
   }
   return false;
 }
@@ -627,7 +843,7 @@ function extractTextFromContent(content: unknown): string {
       parts.push(block.text);
     }
   }
-  return parts.join('\n');
+  return compactProgressiveTextParts(parts).join('\n');
 }
 
 function summarizeToolOutput(text: string): string | undefined {
@@ -834,12 +1050,36 @@ function getLastChatEventAt(): number {
   return _lastChatEventAt;
 }
 
+function setLastAbortedRunId(id: string | null): void {
+  _lastAbortedRunId = id;
+}
+
+function getLastAbortedRunId(): string | null {
+  return _lastAbortedRunId;
+}
+
+function queueBlockedRunEvent(runId: string, event: Record<string, unknown>): void {
+  const events = _blockedRunEvents.get(runId) ?? [];
+  events.push({ ...event });
+  if (events.length > 100) events.shift();
+  _blockedRunEvents.set(runId, events);
+}
+
+function takeBlockedRunEvents(runId: string): Record<string, unknown>[] {
+  const events = _blockedRunEvents.get(runId) ?? [];
+  _blockedRunEvents.delete(runId);
+  return events;
+}
+
 export {
   toMs,
   clearErrorRecoveryTimer,
   clearHistoryPoll,
   extractImagesAsAttachedFiles,
   getMessageText,
+  getMessageStopReason,
+  getMessageErrorMessage,
+  isTerminalAssistantErrorMessage,
   extractMediaRefs,
   extractRawFilePaths,
   makeAttachedFile,
@@ -855,9 +1095,17 @@ export {
   upsertToolStatuses,
   hasNonToolAssistantContent,
   isToolOnlyMessage,
+  normalizeStreamingMessage,
+  matchesOptimisticUserMessage,
+  snapshotStreamingAssistantMessage,
+  getLatestOptimisticUserMessage,
   setHistoryPollTimer,
   hasErrorRecoveryTimer,
   setErrorRecoveryTimer,
   setLastChatEventAt,
   getLastChatEventAt,
+  setLastAbortedRunId,
+  getLastAbortedRunId,
+  queueBlockedRunEvent,
+  takeBlockedRunEvents,
 };

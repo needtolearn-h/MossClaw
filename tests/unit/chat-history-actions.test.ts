@@ -6,6 +6,14 @@ const gatewayStoreGetStateMock = vi.fn();
 const clearHistoryPoll = vi.fn();
 const enrichWithCachedImages = vi.fn((messages) => messages);
 const enrichWithToolResultFiles = vi.fn((messages) => messages);
+const getMessageErrorMessage = vi.fn((message: { errorMessage?: string; error_message?: string } | undefined) => {
+  if (!message) return null;
+  return message.errorMessage ?? message.error_message ?? null;
+});
+const getMessageStopReason = vi.fn((message: { stopReason?: string; stop_reason?: string } | undefined) => {
+  if (!message) return null;
+  return message.stopReason ?? message.stop_reason ?? null;
+});
 const getMessageText = vi.fn((content: unknown) => typeof content === 'string' ? content : '');
 const hasNonToolAssistantContent = vi.fn((message: { content?: unknown } | undefined) => {
   if (!message) return false;
@@ -41,11 +49,42 @@ vi.mock('@/stores/chat/helpers', () => ({
   clearHistoryPoll: (...args: unknown[]) => clearHistoryPoll(...args),
   enrichWithCachedImages: (...args: unknown[]) => enrichWithCachedImages(...args),
   enrichWithToolResultFiles: (...args: unknown[]) => enrichWithToolResultFiles(...args),
+  getLatestOptimisticUserMessage: (messages: Array<{ role: string; timestamp?: number }>, userTimestampMs: number) =>
+    [...messages].reverse().find(
+      (message) => message.role === 'user'
+        && (!message.timestamp || Math.abs(toMs(message.timestamp) - userTimestampMs) < 5000),
+    ),
   getMessageText: (...args: unknown[]) => getMessageText(...args),
   hasNonToolAssistantContent: (...args: unknown[]) => hasNonToolAssistantContent(...args),
   isInternalMessage: (...args: unknown[]) => isInternalMessage(...args),
   isToolResultRole: (...args: unknown[]) => isToolResultRole(...args),
   loadMissingPreviews: (...args: unknown[]) => loadMissingPreviews(...args),
+  matchesOptimisticUserMessage: (
+    candidate: { role: string; timestamp?: number; content?: unknown; _attachedFiles?: Array<{ filePath?: string; fileName?: string; mimeType?: string; fileSize?: number }> },
+    optimistic: { role: string; timestamp?: number; content?: unknown; _attachedFiles?: Array<{ filePath?: string; fileName?: string; mimeType?: string; fileSize?: number }> },
+    optimisticTimestampMs: number,
+  ) => {
+    if (candidate.role !== 'user') return false;
+    const normalizeText = (content: unknown) => (typeof content === 'string' ? content : '')
+      .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const candidateText = normalizeText(candidate.content);
+    const optimisticText = normalizeText(optimistic.content);
+    const candidateAttachments = (candidate._attachedFiles || []).map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`).sort().join('::');
+    const optimisticAttachments = (optimistic._attachedFiles || []).map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`).sort().join('::');
+    const hasCandidateTimestamp = candidate.timestamp != null;
+    const timestampMatches = hasCandidateTimestamp
+      ? Math.abs(toMs(candidate.timestamp as number) - optimisticTimestampMs) < 5000
+      : false;
+
+    if (candidateText && optimisticText && candidateText === optimisticText && candidateAttachments === optimisticAttachments) return true;
+    if (candidateText && optimisticText && candidateText === optimisticText && (!hasCandidateTimestamp || timestampMatches)) return true;
+    if (candidateAttachments && optimisticAttachments && candidateAttachments === optimisticAttachments && (!hasCandidateTimestamp || timestampMatches)) return true;
+    return false;
+  },
+  getMessageErrorMessage: (...args: unknown[]) => getMessageErrorMessage(...args),
+  getMessageStopReason: (...args: unknown[]) => getMessageStopReason(...args),
   toMs: (...args: unknown[]) => toMs(...args as Parameters<typeof toMs>),
 }));
 
@@ -54,6 +93,7 @@ type ChatLikeState = {
   messages: Array<{ role: string; timestamp?: number; content?: unknown; _attachedFiles?: unknown[] }>;
   loading: boolean;
   error: string | null;
+  runError: string | null;
   sending: boolean;
   lastUserMessageAt: number | null;
   pendingFinal: boolean;
@@ -69,6 +109,7 @@ function makeHarness(initial?: Partial<ChatLikeState>) {
     messages: [],
     loading: false,
     error: null,
+    runError: null,
     sending: false,
     lastUserMessageAt: null,
     pendingFinal: false,
@@ -170,6 +211,70 @@ describe('chat history actions', () => {
     expect(h.read().messages.map((message) => message.content)).toEqual(['still here']);
     expect(h.read().error).toBe('Gateway unavailable');
     expect(h.read().loading).toBe(false);
+  });
+
+  it('finalizes sending and surfaces the latest terminal assistant error from history', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+      sending: true,
+      activeRunId: 'run-error',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    invokeIpcMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          { role: 'user', content: 'What model are you?', timestamp: 1773281731 },
+          {
+            role: 'assistant',
+            content: [],
+            timestamp: 1773281732,
+            stopReason: 'error',
+            errorMessage: '404 Resource not found',
+          },
+        ],
+      },
+    });
+
+    await actions.loadHistory(true);
+
+    expect(clearHistoryPoll).toHaveBeenCalledTimes(1);
+    expect(h.read().runError).toBe('404 Resource not found');
+    expect(h.read().sending).toBe(false);
+    expect(h.read().pendingFinal).toBe(false);
+    expect(h.read().activeRunId).toBeNull();
+    expect(h.read().lastUserMessageAt).toBeNull();
+  });
+
+  it('clears stale runError when refreshed history no longer contains a terminal assistant error', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+      runError: 'old model error',
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    invokeIpcMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          { role: 'user', content: 'What model are you?', timestamp: 1773281731 },
+          { role: 'assistant', content: 'I am MiniMax-M2.7', timestamp: 1773281732 },
+        ],
+      },
+    });
+
+    await actions.loadHistory(true);
+
+    expect(h.read().runError).toBeNull();
+    expect(h.read().messages.map((message) => message.content)).toEqual([
+      'What model are you?',
+      'I am MiniMax-M2.7',
+    ]);
   });
 
   it('retries the first foreground startup history load after a timeout and then succeeds', async () => {
@@ -526,5 +631,46 @@ describe('chat history actions', () => {
       'newer message',
     ]);
     expect(h.read().messages[0]?._attachedFiles?.[0]?.preview).toBe('data:image/png;base64,abc');
+  });
+
+  it('does not append an optimistic duplicate when history already includes the user message without timestamp', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+      sending: true,
+      lastUserMessageAt: 1_773_281_732_000,
+      messages: [
+        {
+          role: 'user',
+          content: '[Fri 2026-03-13 10:00 GMT+8] Open browser, search for tech news, and take a screenshot',
+          timestamp: 1_773_281_732,
+        },
+      ],
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    invokeIpcMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          {
+            role: 'user',
+            content: 'Open browser, search for tech news, and take a screenshot',
+          },
+          {
+            role: 'assistant',
+            content: 'Processing',
+            timestamp: 1_773_281_733,
+          },
+        ],
+      },
+    });
+
+    await actions.loadHistory(true);
+
+    expect(h.read().messages.map((message) => message.content)).toEqual([
+      'Open browser, search for tech news, and take a screenshot',
+      'Processing',
+    ]);
   });
 });

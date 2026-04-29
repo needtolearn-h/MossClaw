@@ -20,6 +20,7 @@ import {
   Cpu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { rendererExtensionRegistry } from '@/extensions/registry';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
@@ -57,7 +58,7 @@ function NavItem({ to, icon, label, badge, collapsed, onClick, testId }: NavItem
       data-testid={testId}
       className={({ isActive }) =>
         cn(
-          'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[14px] font-medium transition-colors',
+          'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors',
           'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
           isActive
             ? 'bg-black/5 dark:bg-white/10 text-foreground'
@@ -115,6 +116,7 @@ function getAgentIdFromSessionKey(sessionKey: string): string {
 export function Sidebar() {
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
+  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
 
   const sessions = useChatStore((s) => s.sessions);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
@@ -135,9 +137,11 @@ export function Sidebar() {
     let cancelled = false;
     const hasExistingMessages = useChatStore.getState().messages.length > 0;
     (async () => {
-      await loadSessions();
+      await Promise.allSettled([
+        loadSessions(),
+        loadHistory(hasExistingMessages),
+      ]);
       if (cancelled) return;
-      await loadHistory(hasExistingMessages);
     })();
     return () => {
       cancelled = true;
@@ -208,12 +212,25 @@ export function Sidebar() {
     sessionBucketMap[bucketKey].sessions.push(session);
   }
 
-  const navItems = [
+  const hiddenRoutes = rendererExtensionRegistry.getHiddenRoutes();
+  const extraNavItems = rendererExtensionRegistry.getExtraNavItems();
+
+  const coreNavItems = [
     { to: '/models', icon: <Cpu className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.models'), testId: 'sidebar-nav-models' },
     { to: '/agents', icon: <Bot className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.agents'), testId: 'sidebar-nav-agents' },
     { to: '/channels', icon: <Network className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.channels'), testId: 'sidebar-nav-channels' },
     { to: '/skills', icon: <Puzzle className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.skills'), testId: 'sidebar-nav-skills' },
     { to: '/cron', icon: <Clock className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
+  ];
+
+  const navItems = [
+    ...coreNavItems.filter((item) => !hiddenRoutes.has(item.to)),
+    ...extraNavItems.map((item) => ({
+      to: item.to,
+      icon: <item.icon className="h-[18px] w-[18px]" strokeWidth={2} />,
+      label: item.labelI18nKey ? t(item.labelI18nKey) : item.label,
+      testId: item.testId,
+    })),
   ];
 
   return (
@@ -258,7 +275,7 @@ export function Sidebar() {
             navigate('/');
           }}
           className={cn(
-            'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[14px] font-medium transition-colors mb-2',
+            'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors mb-2',
             'bg-black/5 dark:bg-accent shadow-none border border-transparent text-foreground',
             sidebarCollapsed && 'justify-center px-0',
           )}
@@ -284,7 +301,7 @@ export function Sidebar() {
           {sessionBuckets.map((bucket) => (
             bucket.sessions.length > 0 ? (
               <div key={bucket.key} className="pt-2">
-                <div className="px-2.5 pb-1 text-[11px] font-medium text-muted-foreground/60 tracking-tight">
+                <div className="px-2.5 pb-1 text-tiny font-medium text-muted-foreground/60 tracking-tight">
                   {bucket.label}
                 </div>
                 {bucket.sessions.map((s) => {
@@ -295,7 +312,7 @@ export function Sidebar() {
                       <button
                         onClick={() => { switchSession(s.key); navigate('/'); }}
                         className={cn(
-                          'w-full text-left rounded-lg px-2.5 py-1.5 text-[13px] transition-colors pr-7',
+                          'w-full text-left rounded-lg px-2.5 py-1.5 text-meta transition-colors pr-7',
                           'hover:bg-black/5 dark:hover:bg-white/5',
                           isOnChat && currentSessionKey === s.key
                             ? 'bg-black/5 dark:bg-white/10 text-foreground font-medium'
@@ -303,7 +320,7 @@ export function Sidebar() {
                         )}
                       >
                         <div className="flex min-w-0 items-center gap-2">
-                          <span className="shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-foreground/70 dark:bg-white/[0.08]">
+                          <span className="shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-2xs font-medium text-foreground/70 dark:bg-white/[0.08]">
                             {agentName}
                           </span>
                           <span className="truncate">{getSessionLabel(s.key, s.displayName, s.label)}</span>
@@ -342,7 +359,7 @@ export function Sidebar() {
             data-testid="sidebar-nav-settings"
             className={({ isActive }) =>
               cn(
-                'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[14px] font-medium transition-colors',
+                'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors',
                 'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
                 isActive && 'bg-black/5 dark:bg-white/10 text-foreground',
                 sidebarCollapsed ? 'justify-center px-0' : ''
@@ -359,26 +376,28 @@ export function Sidebar() {
           )}
         </NavLink>
 
-        <Button
-          data-testid="sidebar-open-dev-console"
-          variant="ghost"
-          className={cn(
-            'flex items-center gap-2.5 rounded-lg px-2.5 py-2 h-auto text-[14px] font-medium transition-colors w-full mt-1',
-            'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
-            sidebarCollapsed ? 'justify-center px-0' : 'justify-start'
-          )}
-          onClick={openDevConsole}
-        >
-          <div className="flex shrink-0 items-center justify-center text-muted-foreground">
-            <Terminal className="h-[18px] w-[18px]" strokeWidth={2} />
-          </div>
-          {!sidebarCollapsed && (
-            <>
-              <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">{t('common:sidebar.openClawPage')}</span>
-              <ExternalLink className="h-3 w-3 shrink-0 ml-auto opacity-50 text-muted-foreground" />
-            </>
-          )}
-        </Button>
+        {devModeUnlocked && (
+          <Button
+            data-testid="sidebar-open-dev-console"
+            variant="ghost"
+            className={cn(
+              'flex items-center gap-2.5 rounded-lg px-2.5 py-2 h-auto text-sm font-medium transition-colors w-full mt-1',
+              'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
+              sidebarCollapsed ? 'justify-center px-0' : 'justify-start'
+            )}
+            onClick={openDevConsole}
+          >
+            <div className="flex shrink-0 items-center justify-center text-muted-foreground">
+              <Terminal className="h-[18px] w-[18px]" strokeWidth={2} />
+            </div>
+            {!sidebarCollapsed && (
+              <>
+                <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">{t('common:sidebar.openClawPage')}</span>
+                <ExternalLink className="h-3 w-3 shrink-0 ml-auto opacity-50 text-muted-foreground" />
+              </>
+            )}
+          </Button>
+        )}
       </div>
 
       <ConfirmDialog

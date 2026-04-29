@@ -5,11 +5,14 @@ import {
   clearHistoryPoll,
   enrichWithCachedImages,
   enrichWithToolResultFiles,
+  getLatestOptimisticUserMessage,
+  getMessageErrorMessage,
+  getMessageStopReason,
   getMessageText,
-  hasNonToolAssistantContent,
   isInternalMessage,
   isToolResultRole,
   loadMissingPreviews,
+  matchesOptimisticUserMessage,
   toMs,
 } from './helpers';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './cron-session-utils';
@@ -101,21 +104,36 @@ export function createHistoryActions(
         const userMsgAt = get().lastUserMessageAt;
         if (get().sending && userMsgAt) {
           const userMsMs = toMs(userMsgAt);
-          const hasRecentUser = enrichedMessages.some(
-            (m) => m.role === 'user' && m.timestamp && Math.abs(toMs(m.timestamp) - userMsMs) < 5000,
-          );
-          if (!hasRecentUser) {
-            const currentMsgs = get().messages;
-            const optimistic = [...currentMsgs].reverse().find(
-              (m) => m.role === 'user' && m.timestamp && Math.abs(toMs(m.timestamp) - userMsMs) < 5000,
-            );
-            if (optimistic) {
-              finalMessages = [...enrichedMessages, optimistic];
-            }
+          const optimistic = getLatestOptimisticUserMessage(get().messages, userMsMs);
+          const hasMatchingUser = optimistic
+            ? enrichedMessages.some((message) => matchesOptimisticUserMessage(message, optimistic, userMsMs))
+            : false;
+          if (optimistic && !hasMatchingUser) {
+            finalMessages = [...enrichedMessages, optimistic];
           }
         }
 
-        set({ messages: finalMessages, thinkingLevel, loading: false });
+        const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
+        const userMsTs = lastUserMessageAt ? toMs(lastUserMessageAt) : 0;
+        const isAfterUserMsg = (msg: RawMessage): boolean => {
+          if (!userMsTs || !msg.timestamp) return true;
+          return toMs(msg.timestamp) >= userMsTs;
+        };
+        const latestTerminalAssistantError = [...filteredMessages].reverse().find((msg) => (
+          msg.role === 'assistant'
+          && getMessageStopReason(msg) === 'error'
+          && isAfterUserMsg(msg)
+        ));
+        const latestTerminalAssistantErrorMessage = latestTerminalAssistantError
+          ? getMessageErrorMessage(latestTerminalAssistantError)
+          : null;
+
+        set({
+          messages: finalMessages,
+          thinkingLevel,
+          loading: false,
+          runError: latestTerminalAssistantErrorMessage,
+        });
 
         // Extract first user message text as a session label for display in the toolbar.
         // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
@@ -152,16 +170,28 @@ export function createHistoryActions(
             }));
           }
         });
-        const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
-
         // If we're sending but haven't received streaming events, check
-        // whether the loaded history reveals intermediate tool-call activity.
-        // This surfaces progress via the pendingFinal → ActivityIndicator path.
-        const userMsTs = lastUserMessageAt ? toMs(lastUserMessageAt) : 0;
-        const isAfterUserMsg = (msg: RawMessage): boolean => {
-          if (!userMsTs || !msg.timestamp) return true;
-          return toMs(msg.timestamp) >= userMsTs;
-        };
+        // whether the loaded history reveals assistant activity (tool calls,
+        // narration, etc.).  Setting pendingFinal surfaces the execution
+        // graph / activity indicator in the UI.
+        //
+        // Note: we intentionally do NOT set sending=false here.  Run
+        // completion is exclusively signalled by the Gateway's phase
+        // 'completed' event (handled in gateway.ts) or by receiving a
+        // 'final' streaming event (handled in runtime-event-handlers.ts).
+        // Attempting to infer completion from message history is fragile
+        // and leads to premature sending=false during server-side tool
+        // execution.
+        if (latestTerminalAssistantErrorMessage) {
+          clearHistoryPoll();
+          set({
+            sending: false,
+            activeRunId: null,
+            pendingFinal: false,
+            lastUserMessageAt: null,
+          });
+          return true;
+        }
 
         if (isSendingNow && !pendingFinal) {
           const hasRecentAssistantActivity = [...filteredMessages].reverse().some((msg) => {
@@ -170,19 +200,6 @@ export function createHistoryActions(
           });
           if (hasRecentAssistantActivity) {
             set({ pendingFinal: true });
-          }
-        }
-
-        // If pendingFinal, check whether the AI produced a final text response.
-        if (pendingFinal || get().pendingFinal) {
-          const recentAssistant = [...filteredMessages].reverse().find((msg) => {
-            if (msg.role !== 'assistant') return false;
-            if (!hasNonToolAssistantContent(msg)) return false;
-            return isAfterUserMsg(msg);
-          });
-          if (recentAssistant) {
-            clearHistoryPoll();
-            set({ sending: false, activeRunId: null, pendingFinal: false });
           }
         }
         return true;

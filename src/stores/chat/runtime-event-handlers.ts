@@ -4,15 +4,18 @@ import {
   collectToolUpdates,
   extractImagesAsAttachedFiles,
   extractMediaRefs,
+  getMessageErrorMessage,
   extractRawFilePaths,
   getMessageText,
   getToolCallFilePath,
-  hasErrorRecoveryTimer,
   hasNonToolAssistantContent,
+  isInternalMessage,
+  isTerminalAssistantErrorMessage,
   isToolOnlyMessage,
   isToolResultRole,
   makeAttachedFile,
-  setErrorRecoveryTimer,
+  normalizeStreamingMessage,
+  snapshotStreamingAssistantMessage,
   upsertToolStatuses,
 } from './helpers';
 import type { AttachedFileMeta, RawMessage } from './types';
@@ -38,10 +41,8 @@ export function handleRuntimeEventState(
           // If we're receiving new deltas, the Gateway has recovered from any
           // prior error — cancel the error finalization timer and clear the
           // stale error banner so the user sees the live stream again.
-          if (hasErrorRecoveryTimer()) {
-            clearErrorRecoveryTimer();
-            set({ error: null });
-          }
+          clearErrorRecoveryTimer();
+          if (get().error || get().runError) set({ error: null, runError: null });
           const updates = collectToolUpdates(event.message, resolvedState);
           set((s) => ({
             streamingMessage: (() => {
@@ -65,7 +66,7 @@ export function handleRuntimeEventState(
                   return s.streamingMessage;
                 }
               }
-              return event.message ?? s.streamingMessage;
+              return normalizeStreamingMessage(event.message ?? s.streamingMessage);
             })(),
             streamingTools: updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools,
           }));
@@ -73,20 +74,53 @@ export function handleRuntimeEventState(
         }
         case 'final': {
           clearErrorRecoveryTimer();
-          if (get().error) set({ error: null });
+          if (get().error || get().runError) set({ error: null, runError: null });
           // Message complete - add to history and clear streaming
           const finalMsg = event.message as RawMessage | undefined;
           if (finalMsg) {
-            const updates = collectToolUpdates(finalMsg, resolvedState);
-            if (isToolResultRole(finalMsg.role)) {
+            const normalizedFinalMessage = normalizeStreamingMessage(finalMsg) as RawMessage;
+            if (isTerminalAssistantErrorMessage(normalizedFinalMessage)) {
+              handleRuntimeEventState(
+                set,
+                get,
+                {
+                  ...event,
+                  errorMessage: getMessageErrorMessage(normalizedFinalMessage) ?? event.errorMessage,
+                  message: normalizedFinalMessage,
+                },
+                'error',
+                runId,
+              );
+              break;
+            }
+            const updates = collectToolUpdates(normalizedFinalMessage, resolvedState);
+            // Filter out internal-only final responses (NO_REPLY, HEARTBEAT_OK, etc.)
+            // before adding to messages. Without this guard, the internal token appears
+            // briefly in the UI until loadHistory replaces the message list — and if the
+            // quiet-mode reload is debounced away, the token can stay visible permanently.
+            if (isInternalMessage(normalizedFinalMessage)) {
+              set({
+                streamingText: '',
+                streamingMessage: null,
+                sending: false,
+                activeRunId: null,
+                pendingFinal: false,
+                streamingTools: [],
+                pendingToolImages: [],
+              });
+              clearHistoryPoll();
+              void get().loadHistory(true);
+              break;
+            }
+            if (isToolResultRole(normalizedFinalMessage.role)) {
               // Resolve file path from the streaming assistant message's matching tool call
               const currentStreamForPath = get().streamingMessage as RawMessage | null;
-              const matchedPath = (currentStreamForPath && finalMsg.toolCallId)
-                ? getToolCallFilePath(currentStreamForPath, finalMsg.toolCallId)
+              const matchedPath = (currentStreamForPath && normalizedFinalMessage.toolCallId)
+                ? getToolCallFilePath(currentStreamForPath, normalizedFinalMessage.toolCallId)
                 : undefined;
 
               // Mirror enrichWithToolResultFiles: collect images + file refs for next assistant msg
-              const toolFiles: AttachedFileMeta[] = extractImagesAsAttachedFiles(finalMsg.content)
+              const toolFiles: AttachedFileMeta[] = extractImagesAsAttachedFiles(normalizedFinalMessage.content)
                 .map((file) => (file.source ? file : { ...file, source: 'tool-result' }));
               if (matchedPath) {
                 for (const f of toolFiles) {
@@ -96,7 +130,7 @@ export function handleRuntimeEventState(
                   }
                 }
               }
-              const text = getMessageText(finalMsg.content);
+              const text = getMessageText(normalizedFinalMessage.content);
               if (text) {
                 const mediaRefs = extractMediaRefs(text);
                 const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
@@ -112,22 +146,7 @@ export function handleRuntimeEventState(
                 // tool result. Without snapshotting here, the intermediate thinking+tool steps
                 // would be overwritten by the next turn's deltas and never appear in the UI.
                 const currentStream = s.streamingMessage as RawMessage | null;
-                const snapshotMsgs: RawMessage[] = [];
-                if (currentStream) {
-                  const streamRole = currentStream.role;
-                  if (streamRole === 'assistant' || streamRole === undefined) {
-                    // Use message's own id if available, otherwise derive a stable one from runId
-                    const snapId = currentStream.id
-                      || `${runId || 'run'}-turn-${s.messages.length}`;
-                    if (!s.messages.some(m => m.id === snapId)) {
-                      snapshotMsgs.push({
-                        ...(currentStream as RawMessage),
-                        role: 'assistant',
-                        id: snapId,
-                      });
-                    }
-                  }
-                }
+                const snapshotMsgs = snapshotStreamingAssistantMessage(currentStream, s.messages, runId);
                 return {
                   messages: snapshotMsgs.length > 0 ? [...s.messages, ...snapshotMsgs] : s.messages,
                   streamingText: '',
@@ -141,9 +160,9 @@ export function handleRuntimeEventState(
               });
               break;
             }
-            const toolOnly = isToolOnlyMessage(finalMsg);
-            const hasOutput = hasNonToolAssistantContent(finalMsg);
-            const msgId = finalMsg.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
+            const toolOnly = isToolOnlyMessage(normalizedFinalMessage);
+            const hasOutput = hasNonToolAssistantContent(normalizedFinalMessage);
+            const msgId = normalizedFinalMessage.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
             set((s) => {
               const nextTools = updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools;
               const streamingTools = hasOutput ? [] : nextTools;
@@ -152,12 +171,12 @@ export function handleRuntimeEventState(
               const pendingImgs = s.pendingToolImages;
               const msgWithImages: RawMessage = pendingImgs.length > 0
                 ? {
-                  ...finalMsg,
-                  role: (finalMsg.role || 'assistant') as RawMessage['role'],
+                  ...normalizedFinalMessage,
+                  role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'],
                   id: msgId,
-                  _attachedFiles: [...(finalMsg._attachedFiles || []), ...pendingImgs],
+                  _attachedFiles: [...(normalizedFinalMessage._attachedFiles || []), ...pendingImgs],
                 }
-                : { ...finalMsg, role: (finalMsg.role || 'assistant') as RawMessage['role'], id: msgId };
+                : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
               const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
 
               // Check if message already exists (prevent duplicates)
@@ -211,59 +230,45 @@ export function handleRuntimeEventState(
           break;
         }
         case 'error': {
-          const errorMsg = String(event.errorMessage || 'An error occurred');
+          const errorMsg = String(
+            event.errorMessage
+            || getMessageErrorMessage(event.message)
+            || 'An error occurred',
+          );
+          const terminalAssistantError = isTerminalAssistantErrorMessage(event.message);
           const wasSending = get().sending;
 
           // Snapshot the current streaming message into messages[] so partial
           // content ("Let me get that written down...") is preserved in the UI
           // rather than being silently discarded.
           const currentStream = get().streamingMessage as RawMessage | null;
-          if (currentStream && (currentStream.role === 'assistant' || currentStream.role === undefined)) {
-            const snapId = (currentStream as RawMessage).id
-              || `error-snap-${Date.now()}`;
-            const alreadyExists = get().messages.some(m => m.id === snapId);
-            if (!alreadyExists) {
-              set((s) => ({
-                messages: [...s.messages, { ...currentStream, role: 'assistant' as const, id: snapId }],
-              }));
-            }
+          const errorSnapshot = snapshotStreamingAssistantMessage(
+            currentStream,
+            get().messages,
+            `error-${runId || Date.now()}`,
+          );
+          if (errorSnapshot.length > 0) {
+            set((s) => ({
+              messages: [...s.messages, ...errorSnapshot],
+            }));
           }
 
           set({
-            error: errorMsg,
+            error: terminalAssistantError ? null : errorMsg,
+            runError: terminalAssistantError ? errorMsg : null,
+            sending: false,
+            activeRunId: null,
             streamingText: '',
             streamingMessage: null,
             streamingTools: [],
             pendingFinal: false,
+            lastUserMessageAt: null,
             pendingToolImages: [],
           });
-
-          // Don't immediately give up: the Gateway often retries internally
-          // after transient API failures (e.g. "terminated"). Keep `sending`
-          // true for a grace period so that recovery events are processed and
-          // the agent-phase-completion handler can still trigger loadHistory.
+          clearHistoryPoll();
+          clearErrorRecoveryTimer();
           if (wasSending) {
-            clearErrorRecoveryTimer();
-            const ERROR_RECOVERY_GRACE_MS = 15_000;
-            setErrorRecoveryTimer(setTimeout(() => {
-              setErrorRecoveryTimer(null);
-              const state = get();
-              if (state.sending && !state.streamingMessage) {
-                clearHistoryPoll();
-                // Grace period expired with no recovery — finalize the error
-                set({
-                  sending: false,
-                  activeRunId: null,
-                  lastUserMessageAt: null,
-                });
-                // One final history reload in case the Gateway completed in the
-                // background and we just missed the event.
-                state.loadHistory(true);
-              }
-            }, ERROR_RECOVERY_GRACE_MS));
-          } else {
-            clearHistoryPoll();
-            set({ sending: false, activeRunId: null, lastUserMessageAt: null });
+            void get().loadHistory(true);
           }
           break;
         }
@@ -291,7 +296,7 @@ export function handleRuntimeEventState(
             console.warn(`[handleChatEvent] Unknown event state "${resolvedState}", treating message as streaming delta. Event keys:`, Object.keys(event));
             const updates = collectToolUpdates(event.message, 'delta');
             set((s) => ({
-              streamingMessage: event.message ?? s.streamingMessage,
+              streamingMessage: normalizeStreamingMessage(event.message ?? s.streamingMessage),
               streamingTools: updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools,
             }));
           }

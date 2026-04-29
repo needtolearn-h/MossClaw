@@ -13,8 +13,6 @@
     "noLogs": "（暂无日志）",
     "toolbar": {
         "refresh": "刷新聊天",
-        "showThinking": "显示思考过程",
-        "hideThinking": "隐藏思考过程",
         "currentAgent": "当前对话对象：{{agent}}"
     },
     "taskPanel": {
@@ -34,22 +32,22 @@
         }
     },
     "executionGraph": {
-        "eyebrow": "对话执行",
         "title": "执行关系图",
-        "status": {
-            "active": "执行中",
-            "latest": "最近一次",
-            "previous": "历史"
-        },
         "branchLabel": "分支",
-        "userTrigger": "用户触发",
-        "userTriggerHint": "对应上方这条用户消息",
+        "thinkingLabel": "思考中",
+        "modelErrorTitle": "模型调用失败",
         "agentRun": "{{agent}} 执行",
-        "agentReply": "助手回复",
-        "agentReplyHint": "结果体现在下方这条助手回复里"
+        "collapsedSummary": "{{toolCount}} 个工具调用，{{processCount}} 条过程消息",
+        "collapseAction": "收起执行关系图"
     },
     "composer": {
         "attachFiles": "添加文件",
+        "pickSkill": "选择技能",
+        "skillButton": "技能",
+        "skillPickerTitle": "{{agent}} 的快捷技能",
+        "skillSearchPlaceholder": "搜索技能",
+        "skillLoading": "正在加载技能...",
+        "skillEmpty": "未找到匹配的技能",
         "pickAgent": "选择 Agent",
         "clearTarget": "清除目标 Agent",
         "targetChip": "@{{agent}}",
