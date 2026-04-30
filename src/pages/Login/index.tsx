@@ -96,7 +96,7 @@ export function Login() {
       setLoginToken(randomVal);
       console.log(`[SSO] Login token: ${loginToken}`);
       localStorage.setItem('loginToken', randomVal);
-      location.href = `${baseUrl}/sso/ssoLoginPage?returnUrl=${encodeUrl}&loginToken=${randomVal}`;
+      location.href = `${baseUrl}/sso/ssoLoginPage?clientType=mossclaw&returnUrl=${encodeUrl}&loginToken=${randomVal}`;
     } catch (error) {
       console.error('Failed to open external browser:', error);
       // 降级方案：在当前窗口打开
