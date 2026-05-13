@@ -68,6 +68,7 @@ import {
 } from '../services/providers/provider-runtime-sync';
 import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
+import { GatewayRpcBackpressure } from '../gateway/rpc-backpressure';
 import { registerHostApiProxyHandlers } from './ipc/host-api-proxy';
 import {
   isLaunchAtStartupKey,
@@ -76,6 +77,8 @@ import {
   type AppRequest,
   type AppResponse,
 } from './ipc/request-helpers';
+
+const gatewayRpcBackpressure = new GatewayRpcBackpressure();
 
 /**
  * Register all IPC handlers
@@ -1254,7 +1257,12 @@ function registerGatewayHandlers(
         }
       }
 
-      const result = await gatewayManager.rpc(method, params, timeoutMs);
+      const result = await gatewayRpcBackpressure.run(
+        method,
+        params,
+        timeoutMs,
+        (rpcMethod, rpcParams, rpcTimeoutMs) => gatewayManager.rpc(rpcMethod, rpcParams, rpcTimeoutMs),
+      );
       return { success: true, result };
     } catch (error) {
       logger.warn(`[gateway:rpc] ${method} failed (timeoutMs=${timeoutMs ?? 30000}): ${String(error)}`);
