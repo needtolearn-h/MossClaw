@@ -7,6 +7,7 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
+import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
   CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS,
@@ -62,6 +63,7 @@ const _historyLoadInFlight = new Map<string, Promise<void>>();
 const _lastHistoryLoadAtBySession = new Map<string, number>();
 const _forceNextHistoryLoadBySession = new Set<string>();
 const _foregroundHistoryLoadSeen = new Set<string>();
+const _sessionHistoryCache = new Map<string, { messages: RawMessage[]; thinkingLevel: string | null }>();
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const HISTORY_POLL_SILENCE_WINDOW_MS = 2_500;
@@ -84,6 +86,40 @@ function clearHistoryPoll(): void {
 
 function forceNextHistoryLoad(sessionKey: string): void {
   _forceNextHistoryLoadBySession.add(sessionKey);
+}
+
+function cloneHistoryMessages(messages: RawMessage[]): RawMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    _attachedFiles: message._attachedFiles?.map((file) => ({ ...file })),
+  }));
+}
+
+function cacheSessionHistory(sessionKey: string, messages: RawMessage[], thinkingLevel: string | null): void {
+  _sessionHistoryCache.set(sessionKey, {
+    messages: cloneHistoryMessages(messages),
+    thinkingLevel,
+  });
+}
+
+function getCachedSessionHistory(sessionKey: string): { messages: RawMessage[]; thinkingLevel: string | null } | null {
+  const cached = _sessionHistoryCache.get(sessionKey);
+  if (!cached) return null;
+  return {
+    messages: cloneHistoryMessages(cached.messages),
+    thinkingLevel: cached.thinkingLevel,
+  };
+}
+
+function clearCachedSessionHistory(sessionKey: string): void {
+  _sessionHistoryCache.delete(sessionKey);
+}
+
+function getHistoryForegroundLoadKey(sessionKey: string): string {
+  const gatewayState = useGatewayStore.getState?.() as { status?: { pid?: number; connectedAt?: number; port?: number } } | undefined;
+  const gatewayStatus = gatewayState?.status;
+  const gatewayRuntimeKey = `${gatewayStatus?.pid ?? 'none'}:${gatewayStatus?.connectedAt ?? 'none'}:${gatewayStatus?.port ?? 'none'}`;
+  return `${gatewayRuntimeKey}|${sessionKey}`;
 }
 
 function pruneChatEventDedupe(now: number): void {
@@ -423,27 +459,75 @@ function mimeFromExtension(filePath: string): string {
   return map[ext] || 'application/octet-stream';
 }
 
+const DIRECTORY_MIME_TYPE = 'application/x-directory';
+
+function trimPathTerminators(filePath: string): string {
+  return filePath.replace(/[，。；;,.!?]+$/u, '');
+}
+
 /**
  * Extract raw file paths from message text.
  * Detects absolute paths (Unix: / or ~/, Windows: C:\ etc.) ending with common file extensions.
  * Handles both image and non-image files, consistent with channel push message behavior.
+ *
+ * Also recognises the `MEDIA:` / `media:` prefix the OpenClaw runtime
+ * emits for produced artifacts (e.g.
+ * `MEDIA:/tmp/desktop_screenshot.png`) — without this the leading colon
+ * trips the URL guard on the unix regex below and the artifact never
+ * surfaces as an attachment. Mirrors `chat/helpers.ts::extractRawFilePaths`.
  */
 function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
   const refs: Array<{ filePath: string; mimeType: string }> = [];
   const seen = new Set<string>();
   const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
+  // Tagged media references (MEDIA:/path, media:~/path, ...). The agent
+  // runtime uses this prefix as an explicit "this is an artifact" marker,
+  // so we want them recognised even though the leading colon would
+  // normally look like a URL scheme. After matching we punch the entire
+  // `MEDIA:<path>` span out of the working text so the generic unix
+  // regex below doesn't double-count the bare `/path` suffix.
+  // The character class deliberately allows ASCII spaces inside the path so
+  // that macOS' default screenshot filename ("截屏 2026-05-06 17.46.51.png")
+  // and other space-containing paths the agent emits with the explicit
+  // `MEDIA:` marker still resolve. Newline and quote characters remain
+  // path terminators so we don't accidentally swallow trailing prose.
+  const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/)[^\\n"'()\\[\\],<>` + '`' + `]*?\\.(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>` + '`' + `]|[，。；;,.!?])`, 'g');
+  let workingText = text;
+  let taggedMatch: RegExpExecArray | null;
+  while ((taggedMatch = taggedRegex.exec(text)) !== null) {
+    const p = taggedMatch[1];
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      refs.push({ filePath: p, mimeType: mimeFromExtension(p) });
+    }
+    // Mask the matched span so subsequent regexes can't re-discover the
+    // same path (e.g. `/two.xlsx` from `MEDIA:~/two.xlsx`).
+    const start = taggedMatch.index;
+    const end = start + taggedMatch[0].length;
+    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
+  }
   // Unix absolute paths (/... or ~/...) — lookbehind rejects mid-token slashes
   // (e.g. "path/to/file.mp4", "https://example.com/file.mp4")
-  const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
+  const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
   // Windows absolute paths (C:\... D:\...) — lookbehind rejects drive letter glued to a word
-  const winRegex = new RegExp(`(?<![\\w])([A-Za-z]:\\\\[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
-  for (const regex of [unixRegex, winRegex]) {
+  const winRegex = new RegExp(`(?<![\\w])([A-Za-z]:\\\\[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
+  const skillPathBoundary = '(?=$|\\s|[\\x5b\\x5d"\'`(),<>，。；;,.!?])';
+  const skillPathPart = '[^\\\\/\\s\\n"\'`()\\x5b\\x5d,<>]+';
+  const skillPathTail = '[^\\s\\n"\'`()\\x5b\\x5d,<>]*?';
+  const skillDirRegex = new RegExp(
+    `(?<![\\w./:])((?:~[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathPart})|(?:(?:\\/|[A-Za-z]:\\\\)${skillPathTail}[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathPart}))${skillPathBoundary}`,
+    'gi',
+  );
+  for (const regex of [unixRegex, winRegex, skillDirRegex]) {
     let match;
-    while ((match = regex.exec(text)) !== null) {
-      const p = match[1];
+    while ((match = regex.exec(workingText)) !== null) {
+      const p = trimPathTerminators(match[1]);
       if (p && !seen.has(p)) {
         seen.add(p);
-        refs.push({ filePath: p, mimeType: mimeFromExtension(p) });
+        refs.push({
+          filePath: p,
+          mimeType: regex === skillDirRegex ? DIRECTORY_MIME_TYPE : mimeFromExtension(p),
+        });
       }
     }
   }
@@ -489,6 +573,22 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           mimeType,
           fileSize: 0,
           preview: `data:${mimeType};base64,${block.data}`,
+        });
+      }
+      // Path 3: Flat URL form from Gateway-injected assistant-media messages.
+      // See `src/stores/chat/helpers.ts` for the canonical implementation.
+      else if (block.url) {
+        const mimeType = block.mimeType || 'image/jpeg';
+        const fileName = typeof block.alt === 'string' && block.alt
+          ? block.alt
+          : 'image';
+        files.push({
+          fileName,
+          mimeType,
+          fileSize: 0,
+          preview: null,
+          gatewayUrl: block.url,
+          source: 'gateway-media',
         });
       }
     }
@@ -610,8 +710,15 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
       // Resolve file path from the matching tool call
       const matchedPath = msg.toolCallId ? toolCallPaths.get(msg.toolCallId) : undefined;
 
-      // 1. Image/file content blocks in the structured content array
-      const imageFiles = extractImagesAsAttachedFiles(msg.content);
+      // 1. Image/file content blocks in the structured content array.
+      //    Images embedded inside a tool result are the model's vision data
+      //    (e.g. `read /tmp/foo.png` re-encoded as JPEG so the model can "see"
+      //    the file) — they are NOT user-facing artifacts. The agent surfaces
+      //    user-facing images through `MEDIA:/path` text + the Gateway's
+      //    `assistant-media` injection. Surfacing the vision data here would
+      //    duplicate every screenshot the agent inspects.
+      const imageFiles = extractImagesAsAttachedFiles(msg.content)
+        .filter(file => !file.mimeType.startsWith('image/'));
       if (matchedPath) {
         for (const f of imageFiles) {
           if (!f.filePath) {
@@ -620,6 +727,9 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
           }
         }
       }
+      // Tag all files from tool results so ChatMessage can suppress them
+      // in segments that already have an ExecutionGraphCard.
+      for (const f of imageFiles) f.source = 'tool-result';
       pending.push(...imageFiles);
 
       // 2. [media attached: ...] patterns in tool result text output
@@ -628,13 +738,19 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
         const mediaRefs = extractMediaRefs(text);
         const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
         for (const ref of mediaRefs) {
-          pending.push(makeAttachedFile(ref));
+          pending.push({ ...makeAttachedFile(ref), source: 'tool-result' });
         }
-        // 3. Raw file paths in tool result text (documents, audio, video, etc.)
+        // 3. Raw NON-image file paths in tool result text (documents,
+        //    audio, video, ...). Image paths are deliberately ignored:
+        //    `ls -la /tmp/foo.png`, `sips ... && ls -la *.jpg`, etc.
+        //    spam intermediate paths that the user does not want to see
+        //    rendered as separate cards. The canonical user-facing image
+        //    is whatever the agent later emits via `MEDIA:/path` (which
+        //    the Gateway turns into a dedicated assistant-media bubble).
         for (const ref of extractRawFilePaths(text)) {
-          if (!mediaRefPaths.has(ref.filePath)) {
-            pending.push(makeAttachedFile(ref));
-          }
+          if (mediaRefPaths.has(ref.filePath)) continue;
+          if (ref.mimeType.startsWith('image/')) continue;
+          pending.push({ ...makeAttachedFile(ref), source: 'tool-result' });
         }
       }
 
@@ -667,10 +783,29 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
  * Uses local cache for previews when available; missing previews are loaded async.
  */
 function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
+  // Pre-compute, per index, whether the *next* assistant message is a
+  // Gateway-injected `assistant-media` bubble (i.e. has at least one
+  // `image` content block carrying a flat URL). When that bubble exists,
+  // the canonical user-facing rendering of the artifact is the bubble
+  // itself — anything the agent emitted via `MEDIA:/path` in its prior
+  // text turn would just duplicate the same image, so image-typed raw
+  // refs on that prior message should be dropped here.
+  const nextHasGatewayMediaBubble = messages.map((_, idx) => {
+    const next = messages[idx + 1];
+    if (!next || next.role !== 'assistant') return false;
+    return extractImagesAsAttachedFiles(next.content).some(f => f.gatewayUrl);
+  });
+
   return messages.map((msg, idx) => {
-    // Only process user and assistant messages; skip if already enriched
-    if ((msg.role !== 'user' && msg.role !== 'assistant') || msg._attachedFiles) return msg;
+    // Only process user and assistant messages.
+    if (msg.role !== 'user' && msg.role !== 'assistant') return msg;
     const text = getMessageText(msg.content);
+
+    // Path 0: Gateway-injected outgoing media on this same message
+    // (an `assistant-media` bubble — image block with flat `url`).
+    const gatewayMediaFiles: AttachedFileMeta[] = msg.role === 'assistant'
+      ? extractImagesAsAttachedFiles(msg.content).filter(file => file.gatewayUrl)
+      : [];
 
     // Path 1: [media attached: path (mime) | path] — guaranteed format from attachment button
     const mediaRefs = extractMediaRefs(text);
@@ -679,9 +814,6 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     // Path 2: Raw file paths.
     // For assistant messages: scan own text AND the nearest preceding user message text,
     // but only for non-tool-only assistant messages (i.e. the final answer turn).
-    // Tool-only messages (thinking + tool calls) should not show file previews — those
-    // belong to the final answer message that comes after the tool results.
-    // User messages never get raw-path previews so the image is not shown twice.
     let rawRefs: Array<{ filePath: string; mimeType: string }> = [];
     if (msg.role === 'assistant' && !isToolOnlyMessage(msg)) {
       // Own text
@@ -705,16 +837,39 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
       }
     }
 
-    const allRefs = [...mediaRefs, ...rawRefs];
-    if (allRefs.length === 0) return msg;
+    // Dedup vs Gateway-injected bubble: if the very next assistant message
+    // is a Gateway `assistant-media` bubble, drop image-typed raw refs on
+    // *this* message — the bubble already covers them.
+    if (msg.role === 'assistant' && nextHasGatewayMediaBubble[idx]) {
+      rawRefs = rawRefs.filter(r => !r.mimeType.startsWith('image/'));
+    }
 
-    const files: AttachedFileMeta[] = allRefs.map(ref => {
-      const cached = _imageCache.get(ref.filePath);
-      if (cached) return { ...cached, filePath: ref.filePath };
-      const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
-      return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath };
-    });
-    return { ...msg, _attachedFiles: files };
+    const allRefs = [...mediaRefs, ...rawRefs];
+    if (allRefs.length === 0 && gatewayMediaFiles.length === 0) {
+      // Preserve any previously-attached `_attachedFiles` (e.g. set by
+      // `enrichWithToolResultFiles` for non-image artifacts). When nothing
+      // new applies, returning `msg` unmodified keeps those attachments.
+      return msg;
+    }
+
+    const existingFiles = msg._attachedFiles || [];
+    const existingPaths = new Set(existingFiles.map(file => file.filePath).filter(Boolean));
+    const existingGatewayUrls = new Set(
+      existingFiles.map(file => file.gatewayUrl).filter(Boolean) as string[],
+    );
+    const files: AttachedFileMeta[] = allRefs
+      .filter(ref => !existingPaths.has(ref.filePath))
+      .map(ref => {
+        const cached = _imageCache.get(ref.filePath);
+        if (cached) return { ...cached, filePath: ref.filePath, source: 'message-ref' as const };
+        const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
+        return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source: 'message-ref' as const };
+      });
+    const dedupedGatewayMedia = gatewayMediaFiles.filter(
+      file => file.gatewayUrl && !existingGatewayUrls.has(file.gatewayUrl),
+    );
+    if (files.length === 0 && dedupedGatewayMedia.length === 0) return msg;
+    return { ...msg, _attachedFiles: [...existingFiles, ...files, ...dedupedGatewayMedia] };
   });
 }
 
@@ -724,24 +879,29 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
  * Handles both [media attached: ...] patterns and raw filePath entries.
  */
 async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
-  // Collect all image paths that need previews
-  const needPreview: Array<{ filePath: string; mimeType: string }> = [];
-  const seenPaths = new Set<string>();
+  // See helpers.ts loadMissingPreviews for the canonical comment block —
+  // this monolithic copy is kept in sync so legacy chat.ts callers also
+  // resolve Gateway-injected outgoing media URLs into local previews.
+  type PreviewRef = { filePath?: string; gatewayUrl?: string; mimeType: string };
+  const needPreview: PreviewRef[] = [];
+  const seenKeys = new Set<string>();
 
   for (const msg of messages) {
     if (!msg._attachedFiles) continue;
 
-    // Path 1: files with explicit filePath field (raw path detection or enriched refs)
+    // Path 1: files with explicit filePath OR gatewayUrl
     for (const file of msg._attachedFiles) {
-      const fp = file.filePath;
-      if (!fp || seenPaths.has(fp)) continue;
-      // Images: need preview. Non-images: need file size (for FileCard display).
+      const key = file.filePath || file.gatewayUrl;
+      if (!key || seenKeys.has(key)) continue;
       const needsLoad = file.mimeType.startsWith('image/')
         ? !file.preview
         : file.fileSize === 0;
-      if (needsLoad) {
-        seenPaths.add(fp);
-        needPreview.push({ filePath: fp, mimeType: file.mimeType });
+      if (!needsLoad) continue;
+      seenKeys.add(key);
+      if (file.filePath) {
+        needPreview.push({ filePath: file.filePath, mimeType: file.mimeType });
+      } else if (file.gatewayUrl) {
+        needPreview.push({ gatewayUrl: file.gatewayUrl, mimeType: file.mimeType });
       }
     }
 
@@ -752,17 +912,19 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
       for (let i = 0; i < refs.length; i++) {
         const file = msg._attachedFiles[i];
         const ref = refs[i];
-        if (!file || !ref || seenPaths.has(ref.filePath)) continue;
+        if (!file || !ref || seenKeys.has(ref.filePath)) continue;
         const needsLoad = ref.mimeType.startsWith('image/') ? !file.preview : file.fileSize === 0;
         if (needsLoad) {
-          seenPaths.add(ref.filePath);
-          needPreview.push(ref);
+          seenKeys.add(ref.filePath);
+          needPreview.push({ filePath: ref.filePath, mimeType: ref.mimeType });
         }
       }
     }
   }
 
-  if (needPreview.length === 0) return false;
+  if (needPreview.length === 0) {
+    return false;
+  }
 
   try {
     const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number }>>(
@@ -777,15 +939,17 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
     for (const msg of messages) {
       if (!msg._attachedFiles) continue;
 
-      // Update files that have filePath
+      // Update files that have filePath OR gatewayUrl
       for (const file of msg._attachedFiles) {
-        const fp = file.filePath;
-        if (!fp) continue;
-        const thumb = thumbnails[fp];
+        const key = file.filePath || file.gatewayUrl;
+        if (!key) continue;
+        const thumb = thumbnails[key];
         if (thumb && (thumb.preview || thumb.fileSize)) {
           if (thumb.preview) file.preview = thumb.preview;
           if (thumb.fileSize) file.fileSize = thumb.fileSize;
-          _imageCache.set(fp, { ...file });
+          if (file.filePath) {
+            _imageCache.set(file.filePath, { ...file });
+          }
           updated = true;
         }
       }
@@ -885,7 +1049,7 @@ function clearSessionEntryFromMap<T extends Record<string, unknown>>(entries: T,
 function buildSessionSwitchPatch(
   state: Pick<
     ChatState,
-    'currentSessionKey' | 'messages' | 'sessions' | 'sessionLabels' | 'sessionLastActivity'
+    'currentSessionKey' | 'messages' | 'sessions' | 'sessionLabels' | 'sessionLastActivity' | 'thinkingLevel'
   >,
   nextSessionKey: string,
 ): Partial<ChatState> {
@@ -901,6 +1065,7 @@ function buildSessionSwitchPatch(
   const nextSessions = leavingEmpty
     ? state.sessions.filter((session) => session.key !== state.currentSessionKey)
     : state.sessions;
+  const cachedNextSession = getCachedSessionHistory(nextSessionKey);
 
   return {
     currentSessionKey: nextSessionKey,
@@ -912,7 +1077,8 @@ function buildSessionSwitchPatch(
     sessionLastActivity: leavingEmpty
       ? clearSessionEntryFromMap(state.sessionLastActivity, state.currentSessionKey)
       : state.sessionLastActivity,
-    messages: [],
+    messages: cachedNextSession?.messages ?? [],
+    thinkingLevel: cachedNextSession?.thinkingLevel ?? state.thinkingLevel ?? null,
     streamingText: '',
     streamingMessage: null,
     streamingTools: [],
@@ -984,11 +1150,35 @@ function isToolResultRole(role: unknown): boolean {
 }
 
 /** True for internal plumbing messages that should never be shown in the UI. */
-function isInternalMessage(msg: { role?: unknown; content?: unknown }): boolean {
+function isInternalMessage(msg: { role?: unknown; content?: unknown; idempotencyKey?: unknown; model?: unknown }): boolean {
   if (msg.role === 'system') return true;
   const text = getMessageText(msg.content);
   if (msg.role === 'assistant') {
     if (/^(HEARTBEAT_OK|NO_REPLY)\s*$/.test(text)) return true;
+    // OpenClaw's gateway writes a fallback `assistant-media` transcript
+    // message when its `createManagedOutgoingImageBlocks` pipeline fails
+    // ("could not be prepared" warning in stderr). The fallback has:
+    //   - model: 'gateway-injected'
+    //   - idempotencyKey: '<runId>:assistant-media'
+    //   - content: text-only `MEDIA:<staging path>` (NOT an image-url block)
+    // The staging path lives in `~/.openclaw/media/outbound/` which has a
+    // 120s TTL — the file is gone by the time the user reads the chat.
+    // The original `MEDIA:/tmp/...` path is already on the previous
+    // assistant message (the agent's actual reply), so the fallback is
+    // pure duplicate noise. Hide it in the UI so it neither shows a
+    // broken card nor competes with the real reply for layout space.
+    const idempotencyKey = typeof msg.idempotencyKey === 'string' ? msg.idempotencyKey : '';
+    const isGatewayInjectedFallback = msg.model === 'gateway-injected'
+      && idempotencyKey.endsWith(':assistant-media');
+    if (isGatewayInjectedFallback) {
+      const hasImageUrlBlock = Array.isArray(msg.content)
+        && (msg.content as ContentBlock[]).some(
+          (block) => block.type === 'image' && typeof block.url === 'string' && !!block.url,
+        );
+      // Real gateway-media bubbles (with an image-url block) ARE the
+      // canonical render — keep them. Only hide the text-only fallback.
+      if (!hasImageUrlBlock) return true;
+    }
   }
   // Runtime system injections: these arrive as user or assistant-role messages
   // but are internal plumbing (exec results, async-command notices, time pings, etc.)
@@ -1021,6 +1211,71 @@ function isRuntimeSystemInjection(text: string): boolean {
     return true;
   }
   return false;
+}
+
+// ── Write tool_use baseline capture ─────────────────────────────
+//
+// Tool name sets mirror generated-files.ts so we detect the same tools.
+const BASELINE_WRITE_TOOLS = new Set([
+  'Write', 'write_file', 'create_file', 'WriteFile', 'createFile', 'write',
+]);
+const BASELINE_EDIT_TOOLS = new Set([
+  'Edit', 'edit', 'edit_file', 'EditFile',
+  'StrReplace', 'str_replace', 'str_replace_editor',
+  'MultiEdit', 'multi_edit', 'multiEdit',
+]);
+const BASELINE_FILE_PATH_KEYS = ['file_path', 'filepath', 'path', 'fileName', 'file_name', 'target_path'];
+
+function pickFilePathFromInput(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const rec = input as Record<string, unknown>;
+  for (const key of BASELINE_FILE_PATH_KEYS) {
+    const value = rec[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * Scan a streaming message for Write/Edit tool_use blocks and trigger
+ * async baseline reads from disk for each target file.  Called on every
+ * `delta` event; `captureBaseline` is idempotent — duplicate calls for
+ * the same path are no-ops.
+ */
+function isBaselineRealUserMessage(message: RawMessage | undefined): boolean {
+  if (!message || message.role !== 'user') return false;
+  const content = message.content;
+  if (!Array.isArray(content)) return true;
+  const blocks = content as Array<{ type?: string }>;
+  return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');
+}
+
+function countBaselineRealUserMessages(messages: RawMessage[]): number {
+  let count = 0;
+  for (const message of messages) {
+    if (isBaselineRealUserMessage(message)) count += 1;
+  }
+  return count;
+}
+
+function getBaselineRunKeyForMessages(sessionKey: string, messages: RawMessage[]): string | null {
+  const userTurnOrdinal = countBaselineRealUserMessages(messages);
+  return buildBaselineRunKey(sessionKey, userTurnOrdinal);
+}
+
+function captureBaselinesFromMessage(message: unknown, runKey: string | null): void {
+  if (!runKey || !message || typeof message !== 'object') return;
+  const content = (message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return;
+  for (const block of content as ContentBlock[]) {
+    if (block.type !== 'tool_use' && block.type !== 'toolCall') continue;
+    const name = typeof block.name === 'string' ? block.name : '';
+    if (!name) continue;
+    if (!BASELINE_WRITE_TOOLS.has(name) && !BASELINE_EDIT_TOOLS.has(name)) continue;
+    const input = block.input ?? block.arguments;
+    const filePath = pickFilePathFromInput(input);
+    if (filePath) captureBaseline(runKey, filePath);
+  }
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -1412,6 +1667,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // This prevents the poll timer from firing after the switch and loading
     // the wrong session's history into the new session's view.
     clearHistoryPoll();
+    clearBaselines();
     set((s) => buildSessionSwitchPatch(s, key));
     get().loadHistory();
   },
@@ -1420,15 +1676,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   //
   // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
   // RPC — confirmed by inspecting client.ts, protocol.ts and the full codebase.
-  // Deletion is therefore a local-only UI operation: the session is removed from
-  // the sidebar list and its labels/activity maps are cleared.  The underlying
-  // JSONL history file on disk is intentionally left intact, consistent with the
-  // newSession() design that avoids sessions.reset to preserve history.
+  // Deletion is therefore performed locally: the renderer drops the session
+  // from the sidebar / labels / activity maps and the Main process hard-deletes
+  // the on-disk transcript so it stops appearing in sessions.list and stops
+  // contributing to the Dashboard token-usage history.
 
   deleteSession: async (key: string) => {
-    // Soft-delete the session's JSONL transcript on disk.
-    // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
-    // sessions.list skips it automatically.
+    clearCachedSessionHistory(key);
+    // Hard-delete the session's JSONL transcript on disk.
+    // The main process unlinks <id>.jsonl plus any leftover
+    // <id>.deleted.jsonl and <id>.jsonl.reset.* siblings, then removes the
+    // entry from sessions.json so sessions.list stops surfacing it.
     try {
       const result = await hostApiFetch<{
         success: boolean;
@@ -1553,10 +1811,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadHistory: async (quiet = false) => {
     const { currentSessionKey } = get();
-    const isInitialForegroundLoad = !quiet && !_foregroundHistoryLoadSeen.has(currentSessionKey);
+    const foregroundLoadKey = getHistoryForegroundLoadKey(currentSessionKey);
+    const isInitialForegroundLoad = !quiet && !_foregroundHistoryLoadSeen.has(foregroundLoadKey);
     const historyTimeoutOverride = getStartupHistoryTimeoutOverride(isInitialForegroundLoad);
     const forceLoad = _forceNextHistoryLoadBySession.delete(currentSessionKey);
     const existingLoad = _historyLoadInFlight.get(currentSessionKey);
+    const shouldShowForegroundLoading = !quiet && get().messages.length === 0;
     if (existingLoad) {
       await existingLoad;
       if (!forceLoad) {
@@ -1572,15 +1832,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-      if (!quiet) set({ loading: true, error: null, runError: null });
+    if (shouldShowForegroundLoading) set({ loading: true, error: null, runError: null });
 
     // Safety guard: if history loading takes too long, force loading to false
     // to prevent the UI from being stuck in a spinner forever.
     let loadingTimedOut = false;
-    const loadingSafetyTimer = quiet ? null : setTimeout(() => {
+    const loadingSafetyTimer = shouldShowForegroundLoading ? setTimeout(() => {
       loadingTimedOut = true;
       set({ loading: false });
-    }, getHistoryLoadingSafetyTimeout(isInitialForegroundLoad));
+    }, getHistoryLoadingSafetyTimeout(isInitialForegroundLoad)) : null;
 
     const loadPromise = (async () => {
       const isCurrentSession = () => get().currentSessionKey === currentSessionKey;
@@ -1614,7 +1874,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const hasMessages = state.messages.length > 0;
           return {
             loading: false,
-            error: !quiet && errorMessage ? errorMessage : state.error,
+            error: shouldShowForegroundLoading && errorMessage ? errorMessage : state.error,
             ...(hasMessages ? {} : { messages: [] as RawMessage[] }),
           };
         });
@@ -1654,13 +1914,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!userMsTs || !msg.timestamp) return true;
         return toMs(msg.timestamp) >= userMsTs;
       };
-      const latestTerminalAssistantError = [...filteredMessages].reverse().find((msg) => (
-        msg.role === 'assistant'
-        && getMessageStopReason(msg) === 'error'
-        && isAfterUserMsg(msg)
-      ));
-      const latestTerminalAssistantErrorMessage = latestTerminalAssistantError
-        ? getMessageErrorMessage(latestTerminalAssistantError)
+      const isRealUserBoundary = (msg: RawMessage): boolean => {
+        if (msg.role !== 'user') return false;
+        if (!Array.isArray(msg.content)) return true;
+        const blocks = msg.content as Array<{ type?: string }>;
+        return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');
+      };
+      const postBoundaryMessages = userMsTs
+        ? filteredMessages.filter((msg) => isAfterUserMsg(msg))
+        : (() => {
+            for (let i = filteredMessages.length - 1; i >= 0; i -= 1) {
+              if (isRealUserBoundary(filteredMessages[i])) {
+                return filteredMessages.slice(i + 1);
+              }
+            }
+            return filteredMessages;
+          })();
+      const lastAssistantAfterBoundary = [...postBoundaryMessages].reverse().find((msg) => msg.role === 'assistant');
+      const latestTerminalAssistantErrorMessage = lastAssistantAfterBoundary
+        && getMessageStopReason(lastAssistantAfterBoundary) === 'error'
+        ? getMessageErrorMessage(lastAssistantAfterBoundary)
         : null;
 
       set({
@@ -1669,6 +1942,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loading: false,
         runError: latestTerminalAssistantErrorMessage,
       });
+      cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
 
       // Extract first user message text as a session label for display in the toolbar.
       // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
@@ -1795,7 +2069,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           const applied = applyLoadedMessages(rawMessages, thinkingLevel);
           if (applied && isInitialForegroundLoad) {
-            _foregroundHistoryLoadSeen.add(currentSessionKey);
+            _foregroundHistoryLoadSeen.add(foregroundLoadKey);
           }
         } else {
           if (isCurrentSession() && isInitialForegroundLoad && classifyHistoryStartupRetryError(lastError)) {
@@ -1810,7 +2084,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (fallbackMessages.length > 0) {
             const applied = applyLoadedMessages(fallbackMessages, null);
             if (applied && isInitialForegroundLoad) {
-              _foregroundHistoryLoadSeen.add(currentSessionKey);
+              _foregroundHistoryLoadSeen.add(foregroundLoadKey);
             }
           } else {
             applyLoadFailure(
@@ -1825,7 +2099,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (fallbackMessages.length > 0) {
           const applied = applyLoadedMessages(fallbackMessages, null);
           if (applied && isInitialForegroundLoad) {
-            _foregroundHistoryLoadSeen.add(currentSessionKey);
+            _foregroundHistoryLoadSeen.add(foregroundLoadKey);
           }
         } else {
           applyLoadFailure(String(err));
@@ -2129,12 +2403,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeRunId, currentSessionKey } = get();
 
     // Only process events for the current session (when sessionKey is present)
-    if (eventSessionKey != null && eventSessionKey !== currentSessionKey) return;
+    if (eventSessionKey != null && eventSessionKey !== currentSessionKey) {
+      return;
+    }
 
     // Only process events for the active run (or if no active run set)
-    if (activeRunId && runId && runId !== activeRunId) return;
+    if (activeRunId && runId && runId !== activeRunId) {
+      return;
+    }
 
-    if (isDuplicateChatEvent(eventState, event)) return;
+    if (isDuplicateChatEvent(eventState, event)) {
+      return;
+    }
 
     _lastChatEventAt = Date.now();
 
@@ -2186,6 +2466,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           set({ error: null, runError: null });
         }
         const updates = collectToolUpdates(event.message, resolvedState);
+        // Capture baseline file content from disk before the runtime
+        // executes Write tool calls — enables proper before/after diff.
+        captureBaselinesFromMessage(
+          event.message,
+          getBaselineRunKeyForMessages(currentSessionKey, get().messages),
+        );
         set((s) => ({
           streamingMessage: (() => {
             if (event.message && typeof event.message === 'object') {
@@ -2242,10 +2528,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? getToolCallFilePath(currentStreamForPath, normalizedFinalMessage.toolCallId)
               : undefined;
 
-            // Mirror enrichWithToolResultFiles: collect images + file refs for next assistant msg
-            const toolFiles: AttachedFileMeta[] = [
-              ...extractImagesAsAttachedFiles(normalizedFinalMessage.content),
-            ];
+            // Mirror `enrichWithToolResultFiles`: collect non-image artifacts
+            // for the next assistant message. Images embedded inside a tool
+            // result (read tool's vision data) and raw image paths in the
+            // tool's stdout (sips / ls / file output) are NOT user-facing —
+            // the canonical render is the Gateway-injected `assistant-media`
+            // bubble that follows the agent's `MEDIA:` text. Surfacing those
+            // intermediate images here would duplicate every screenshot the
+            // agent inspects on its way to the final artifact.
+            const toolFiles: AttachedFileMeta[] = extractImagesAsAttachedFiles(
+              normalizedFinalMessage.content,
+            ).filter(file => !file.mimeType.startsWith('image/'));
             if (matchedPath) {
               for (const f of toolFiles) {
                 if (!f.filePath) {
@@ -2260,7 +2553,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
               for (const ref of mediaRefs) toolFiles.push(makeAttachedFile(ref));
               for (const ref of extractRawFilePaths(text)) {
-                if (!mediaRefPaths.has(ref.filePath)) toolFiles.push(makeAttachedFile(ref));
+                if (mediaRefPaths.has(ref.filePath)) continue;
+                if (ref.mimeType.startsWith('image/')) continue;
+                toolFiles.push(makeAttachedFile(ref));
               }
             }
             set((s) => {
@@ -2291,7 +2586,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const nextTools = updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools;
             const streamingTools = hasOutput ? [] : nextTools;
 
-            // Attach any images collected from preceding tool results
+            // Note: it would be tempting to also surface `MEDIA:/path`
+            // markers from `normalizedFinalMessage.content`'s text here, so
+            // the agent's reply could attach the original file directly
+            // (`/tmp/...png`) without waiting for the post-final history
+            // reload. However, OpenClaw's `splitTrailingDirective`
+            // (selection-D8_ELZa7.js ~line 904) strips `MEDIA:/...` lines
+            // out of the streaming text BEFORE it reaches the client, so
+            // the `final` event we get here never contains the marker.
+            // Image surfacing is fully handled by the post-final reload
+            // below + `enrichWithCachedImages` (which dereferences the
+            // assistant-media bubble's `block.url`).
             const pendingImgs = s.pendingToolImages;
             const msgWithImages: RawMessage = pendingImgs.length > 0
               ? {
@@ -2345,6 +2650,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (hasOutput && !toolOnly) {
             clearHistoryPoll();
             void get().loadHistory(true);
+
+            // OpenClaw's gateway processes `MEDIA:/path` markers in the
+            // assistant reply asynchronously, in the `dispatch.deliver` of
+            // the `final` payload (see openclaw/dist/chat-DM9hSaNV.js's
+            // `appendWebchatAgentMediaTranscriptIfNeeded`):
+            //   1. copy the original file under
+            //      `~/.openclaw/media/outgoing/originals/<uuid>`
+            //   2. write the record JSON under
+            //      `~/.openclaw/media/outgoing/records/<id>.json`
+            //   3. `appendAssistantTranscriptMessage` writes a follow-up
+            //      `assistant-media` message to the session JSONL, with
+            //      `idempotencyKey: "<runId>:assistant-media"`.
+            // That follow-up message is **only persisted** — it is NOT
+            // re-broadcast as a streaming event. The streaming `final`
+            // we just consumed only contains the agent's text. The
+            // assistant-media bubble can only be retrieved via
+            // `chat.history`, and the persistence runs on the order of
+            // ~400-500ms after the streaming final.
+            //
+            // The immediate `loadHistory(true)` above therefore races the
+            // gateway's write and almost always misses the bubble.
+            //
+            // CRITICAL: we cannot detect from the streaming final alone
+            // whether the agent emitted a `MEDIA:/path` marker — OpenClaw's
+            // `splitTrailingDirective` (selection-D8_ELZa7.js line ~904)
+            // strips `MEDIA:/...` lines from the broadcast text BEFORE it
+            // reaches the client, so the streaming `final` text is always
+            // the user-facing prose without the marker. The MEDIA: marker
+            // only appears in the persisted JSONL transcript (msg N) and
+            // its companion `assistant-media` bubble (msg N+1).
+            //
+            // We therefore unconditionally schedule ONE follow-up quiet
+            // reload ~1500ms after every assistant `final`. The cost is
+            // a single extra in-process RPC per assistant turn (cheap);
+            // when there's no media the second reload returns the same
+            // history snapshot and is a no-op for the UI.
+            // `forceNextHistoryLoad` bypasses `HISTORY_LOAD_MIN_INTERVAL_MS`
+            // so the call is not suppressed by the throttle.
+            const sessionKeyAtFinal = get().currentSessionKey;
+            setTimeout(() => {
+              if (get().currentSessionKey !== sessionKeyAtFinal) {
+                return;
+              }
+              forceNextHistoryLoad(sessionKeyAtFinal);
+              void get().loadHistory(true);
+            }, 1500);
           }
         } else {
           // No message in final event - reload history to get complete data

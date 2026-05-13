@@ -3,7 +3,7 @@
  * Navigation sidebar with menu items.
  * No longer fixed - sits inside the flex layout below the title bar.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Network,
@@ -18,6 +18,7 @@ import {
   ExternalLink,
   Trash2,
   Cpu,
+  Moon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { rendererExtensionRegistry } from '@/extensions/registry';
@@ -25,20 +26,13 @@ import { useSettingsStore } from '@/stores/settings';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
+import { getSessionActivityMs, getSessionBucket, type SessionBucketKey } from './session-buckets';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { hostApiFetch } from '@/lib/host-api';
 import { useTranslation } from 'react-i18next';
 import logoSvg from '@/assets/logo.svg';
-
-type SessionBucketKey =
-  | 'today'
-  | 'yesterday'
-  | 'withinWeek'
-  | 'withinTwoWeeks'
-  | 'withinMonth'
-  | 'older';
 
 interface NavItemProps {
   to: string;
@@ -58,7 +52,7 @@ function NavItem({ to, icon, label, badge, collapsed, onClick, testId }: NavItem
       data-testid={testId}
       className={({ isActive }) =>
         cn(
-          'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors',
+          'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors',
           'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
           isActive
             ? 'bg-black/5 dark:bg-white/10 text-foreground'
@@ -67,42 +61,23 @@ function NavItem({ to, icon, label, badge, collapsed, onClick, testId }: NavItem
         )
       }
     >
-      {({ isActive }) => (
-        <>
-          <div className={cn("flex shrink-0 items-center justify-center", isActive ? "text-foreground" : "text-muted-foreground")}>
-            {icon}
-          </div>
-          {!collapsed && (
-            <>
-              <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{label}</span>
-              {badge && (
-                <Badge variant="secondary" className="ml-auto shrink-0">
-                  {badge}
-                </Badge>
-              )}
-            </>
-          )}
-        </>
-      )}
+      <>
+        <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
+          {icon}
+        </div>
+        {!collapsed && (
+          <>
+            <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{label}</span>
+            {badge && (
+              <Badge variant="secondary" className="ml-auto shrink-0">
+                {badge}
+              </Badge>
+            )}
+          </>
+        )}
+      </>
     </NavLink>
   );
-}
-
-function getSessionBucket(activityMs: number, nowMs: number): SessionBucketKey {
-  if (!activityMs || activityMs <= 0) return 'older';
-
-  const now = new Date(nowMs);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
-
-  if (activityMs >= startOfToday) return 'today';
-  if (activityMs >= startOfYesterday) return 'yesterday';
-
-  const daysAgo = (startOfToday - activityMs) / (24 * 60 * 60 * 1000);
-  if (daysAgo <= 7) return 'withinWeek';
-  if (daysAgo <= 14) return 'withinTwoWeeks';
-  if (daysAgo <= 30) return 'withinMonth';
-  return 'older';
 }
 
 const INITIAL_NOW_MS = Date.now();
@@ -114,9 +89,14 @@ function getAgentIdFromSessionKey(sessionKey: string): string {
 }
 
 export function Sidebar() {
+  const isMac = window.electron?.platform === 'darwin';
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
+  const sidebarWidth = useSettingsStore((state) => state.sidebarWidth);
+  const setSidebarWidth = useSettingsStore((state) => state.setSidebarWidth);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const [isResizing, setIsResizing] = useState(false);
+  const stopResizeRef = useRef<(() => void) | null>(null);
 
   const sessions = useChatStore((s) => s.sessions);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
@@ -131,22 +111,22 @@ export function Sidebar() {
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
   const isGatewayReady = isGatewayRunning && gatewayStatus.gatewayReady !== false;
+  const gatewayRuntimeKey = `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`;
 
   useEffect(() => {
     if (!isGatewayReady) return;
     let cancelled = false;
-    const hasExistingMessages = useChatStore.getState().messages.length > 0;
     (async () => {
       await Promise.allSettled([
         loadSessions(),
-        loadHistory(hasExistingMessages),
+        loadHistory(false),
       ]);
       if (cancelled) return;
     })();
     return () => {
       cancelled = true;
     };
-  }, [isGatewayReady, loadHistory, loadSessions]);
+  }, [gatewayRuntimeKey, isGatewayReady, loadHistory, loadSessions]);
   const agents = useAgentsStore((s) => s.agents);
   const fetchAgents = useAgentsStore((s) => s.fetchAgents);
 
@@ -156,21 +136,25 @@ export function Sidebar() {
   const getSessionLabel = (key: string, displayName?: string, label?: string) =>
     sessionLabels[key] ?? label ?? displayName ?? key;
 
-  const openDevConsole = async () => {
+  const openControlUi = async (path: string, label: string) => {
     try {
       const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         error?: string;
-      }>('/api/gateway/control-ui');
+      }>(path);
       if (result.success && result.url) {
-        window.electron.openExternal(result.url);
+        await window.electron.openExternal(result.url);
       } else {
-        console.error('Failed to get Dev Console URL:', result.error);
+        console.error(`Failed to get ${label} URL:`, result.error);
       }
     } catch (err) {
-      console.error('Error opening Dev Console:', err);
+      console.error(`Error opening ${label}:`, err);
     }
+  };
+
+  const openDevConsole = async () => {
+    await openControlUi('/api/gateway/control-ui', 'OpenClaw Page');
   };
 
   const { t } = useTranslation(['common', 'chat']);
@@ -187,6 +171,45 @@ export function Sidebar() {
   useEffect(() => {
     void fetchAgents();
   }, [fetchAgents]);
+
+  const stopResizing = useCallback(() => {
+    stopResizeRef.current?.();
+    stopResizeRef.current = null;
+    setIsResizing(false);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+
+  const handleResizePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (sidebarCollapsed) return;
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Window listeners below keep dragging reliable even if capture is unavailable.
+      }
+
+      const onMove = (moveEvent: PointerEvent) => {
+        setSidebarWidth(moveEvent.clientX);
+      };
+      const onUp = () => stopResizing();
+
+      stopResizeRef.current = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      setIsResizing(true);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+    [setSidebarWidth, sidebarCollapsed, stopResizing],
+  );
+
+  useEffect(() => stopResizing, [stopResizing]);
 
   const agentNameById = useMemo(
     () => Object.fromEntries((agents ?? []).map((agent) => [agent.id, agent.name])),
@@ -205,10 +228,13 @@ export function Sidebar() {
     (typeof sessionBuckets)[number]
   >;
 
-  for (const session of [...sessions].sort((a, b) =>
-    (sessionLastActivity[b.key] ?? 0) - (sessionLastActivity[a.key] ?? 0)
-  )) {
-    const bucketKey = getSessionBucket(sessionLastActivity[session.key] ?? 0, nowMs);
+  for (const { session, activityMs } of sessions
+    .map((session) => ({
+      session,
+      activityMs: getSessionActivityMs(session, sessionLastActivity),
+    }))
+    .sort((a, b) => b.activityMs - a.activityMs)) {
+    const bucketKey = getSessionBucket(activityMs, nowMs);
     sessionBucketMap[bucketKey].sessions.push(session);
   }
 
@@ -216,18 +242,21 @@ export function Sidebar() {
   const extraNavItems = rendererExtensionRegistry.getExtraNavItems();
 
   const coreNavItems = [
-    { to: '/models', icon: <Cpu className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.models'), testId: 'sidebar-nav-models' },
-    { to: '/agents', icon: <Bot className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.agents'), testId: 'sidebar-nav-agents' },
-    { to: '/channels', icon: <Network className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.channels'), testId: 'sidebar-nav-channels' },
-    { to: '/skills', icon: <Puzzle className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.skills'), testId: 'sidebar-nav-skills' },
-    { to: '/cron', icon: <Clock className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
+    { to: '/models', icon: <Cpu className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.models'), testId: 'sidebar-nav-models' },
+    { to: '/agents', icon: <Bot className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.agents'), testId: 'sidebar-nav-agents' },
+    { to: '/channels', icon: <Network className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.channels'), testId: 'sidebar-nav-channels' },
+    { to: '/skills', icon: <Puzzle className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.skills'), testId: 'sidebar-nav-skills' },
+    { to: '/cron', icon: <Clock className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
+    ...(devModeUnlocked
+      ? [{ to: '/dreams', icon: <Moon className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.openClawDreams'), testId: 'sidebar-nav-dreams' }]
+      : []),
   ];
 
   const navItems = [
     ...coreNavItems.filter((item) => !hiddenRoutes.has(item.to)),
     ...extraNavItems.map((item) => ({
       to: item.to,
-      icon: <item.icon className="h-[18px] w-[18px]" strokeWidth={2} />,
+      icon: <item.icon className="h-4 w-4" strokeWidth={2} />,
       label: item.labelI18nKey ? t(item.labelI18nKey) : item.label,
       testId: item.testId,
     })),
@@ -237,12 +266,19 @@ export function Sidebar() {
     <aside
       data-testid="sidebar"
       className={cn(
-        'flex min-h-0 shrink-0 flex-col overflow-hidden border-r bg-[#F3F2F7] dark:bg-background transition-all duration-300',
-        sidebarCollapsed ? 'w-16' : 'w-64'
+        'relative flex min-h-0 shrink-0 flex-col overflow-hidden bg-surface-sidebar bg-[#F3F2F7]',
+        isResizing ? 'transition-none' : 'transition-[width] duration-300',
       )}
+      style={{ width: sidebarCollapsed ? 64 : sidebarWidth }}
     >
       {/* Top Header Toggle */}
-      <div className={cn("flex items-center p-2 h-12", sidebarCollapsed ? "justify-center" : "justify-between")}>
+      <div
+        className={cn(
+          'flex items-center p-2 h-12',
+          isMac && 'drag-region h-[4.75rem] items-end pt-10',
+          sidebarCollapsed ? 'justify-center' : 'justify-between',
+        )}
+      >
         {!sidebarCollapsed && (
           <div className="flex items-center gap-2 px-2 overflow-hidden">
             <img src={logoSvg} alt="MossClaw" className="h-5 w-auto shrink-0" />
@@ -254,7 +290,10 @@ export function Sidebar() {
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8 shrink-0 text-muted-foreground hover:bg-black/5 dark:hover:bg-white/10"
+          className={cn(
+            'no-drag h-8 w-8 shrink-0 rounded-lg text-foreground/80',
+            'hover:bg-black/5 hover:text-foreground/80 dark:hover:bg-white/5',
+          )}
           onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
         >
           {sidebarCollapsed ? (
@@ -266,8 +305,9 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex flex-col px-2 gap-0.5">
+      <nav className="flex flex-col gap-0 px-2">
         <button
+          type="button"
           data-testid="sidebar-new-chat"
           onClick={() => {
             const { messages } = useChatStore.getState();
@@ -275,13 +315,13 @@ export function Sidebar() {
             navigate('/');
           }}
           className={cn(
-            'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors mb-2',
-            'bg-black/5 dark:bg-accent shadow-none border border-transparent text-foreground',
+            'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors',
+            'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
             sidebarCollapsed && 'justify-center px-0',
           )}
         >
-          <div className="flex shrink-0 items-center justify-center text-foreground/80">
-            <Plus className="h-[18px] w-[18px]" strokeWidth={2} />
+          <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
+            <Plus className="h-4 w-4" strokeWidth={2} />
           </div>
           {!sidebarCollapsed && <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">{t('sidebar.newChat')}</span>}
         </button>
@@ -300,7 +340,7 @@ export function Sidebar() {
         <div className="mt-4 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 space-y-0.5">
           {sessionBuckets.map((bucket) => (
             bucket.sessions.length > 0 ? (
-              <div key={bucket.key} className="pt-2">
+              <div key={bucket.key} data-testid={`session-bucket-${bucket.key}`} className="pt-2">
                 <div className="px-2.5 pb-1 text-tiny font-medium text-muted-foreground/60 tracking-tight">
                   {bucket.label}
                 </div>
@@ -310,7 +350,14 @@ export function Sidebar() {
                   return (
                     <div key={s.key} className="group relative flex items-center">
                       <button
-                        onClick={() => { switchSession(s.key); navigate('/'); }}
+                        onClick={() => {
+                          if (currentSessionKey === s.key) {
+                            void loadHistory(false);
+                          } else {
+                            switchSession(s.key);
+                          }
+                          navigate('/');
+                        }}
                         className={cn(
                           'w-full text-left rounded-lg px-2.5 py-1.5 text-meta transition-colors pr-7',
                           'hover:bg-black/5 dark:hover:bg-white/5',
@@ -359,21 +406,19 @@ export function Sidebar() {
             data-testid="sidebar-nav-settings"
             className={({ isActive }) =>
               cn(
-                'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors',
+                'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors',
                 'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
                 isActive && 'bg-black/5 dark:bg-white/10 text-foreground',
                 sidebarCollapsed ? 'justify-center px-0' : ''
               )
             }
           >
-          {({ isActive }) => (
-            <>
-              <div className={cn("flex shrink-0 items-center justify-center", isActive ? "text-foreground" : "text-muted-foreground")}>
-                <SettingsIcon className="h-[18px] w-[18px]" strokeWidth={2} />
-              </div>
-              {!sidebarCollapsed && <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{t('sidebar.settings')}</span>}
-            </>
-          )}
+          <>
+            <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
+              <SettingsIcon className="h-4 w-4" strokeWidth={2} />
+            </div>
+            {!sidebarCollapsed && <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{t('sidebar.settings')}</span>}
+          </>
         </NavLink>
 
         {devModeUnlocked && (
@@ -381,24 +426,43 @@ export function Sidebar() {
             data-testid="sidebar-open-dev-console"
             variant="ghost"
             className={cn(
-              'flex items-center gap-2.5 rounded-lg px-2.5 py-2 h-auto text-sm font-medium transition-colors w-full mt-1',
+              'sidebar-nav-text mt-0.5 flex h-auto w-full items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors',
               'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
               sidebarCollapsed ? 'justify-center px-0' : 'justify-start'
             )}
             onClick={openDevConsole}
           >
-            <div className="flex shrink-0 items-center justify-center text-muted-foreground">
-              <Terminal className="h-[18px] w-[18px]" strokeWidth={2} />
+            <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
+              <Terminal className="h-4 w-4" strokeWidth={2} />
             </div>
             {!sidebarCollapsed && (
               <>
                 <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">{t('common:sidebar.openClawPage')}</span>
-                <ExternalLink className="h-3 w-3 shrink-0 ml-auto opacity-50 text-muted-foreground" />
+                <ExternalLink className="ml-auto h-3 w-3 shrink-0 opacity-50 text-current" />
               </>
             )}
           </Button>
         )}
       </div>
+
+      {!sidebarCollapsed && (
+        <div
+          data-testid="sidebar-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-valuemin={220}
+          aria-valuemax={420}
+          aria-valuenow={sidebarWidth}
+          title="Drag to resize sidebar"
+          onPointerDown={handleResizePointerDown}
+          className="no-drag group absolute inset-y-0 right-0 z-20 w-2 translate-x-1/2 cursor-col-resize select-none"
+        >
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-primary/40"
+          />
+        </div>
+      )}
 
       <ConfirmDialog
         open={!!sessionToDelete}

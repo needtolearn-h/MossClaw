@@ -18,7 +18,14 @@ function fsPath(filePath: string): string {
 import { getAllSettings } from '../utils/store';
 import { getApiKey, getDefaultProvider, getProvider } from '../utils/secure-storage';
 import { getProviderEnvVar, getKeyableProviderTypes } from '../utils/provider-registry';
-import { getOpenClawPluginStageDir, getOpenClawRuntimeDir, getOpenClawRuntimeEntryPath, isOpenClawPresent } from '../utils/paths';
+import {
+  getOpenClawConfigDir,
+  getOpenClawDir,
+  getOpenClawEntryPath,
+  getOpenClawResolvedDir,
+  getOpenClawSkillsDir,
+  isOpenClawPresent,
+} from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
 import { sanitizeOpenClawConfig, batchSyncConfigFields } from '../utils/openclaw-auth';
@@ -28,14 +35,21 @@ import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
 import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe } from '../utils/plugin-install';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
-import { cleanupAgentsSymlinkedSkills } from './skills-symlink-cleanup';
+import { cleanupAgentsSymlinkedSkills, cleanupStalePluginRuntimeDeps } from './skills-symlink-cleanup';
+import {
+  buildPrelaunchMaintenanceCacheKey,
+  directoryChildrenSignature,
+  pathSignature,
+  runCachedPrelaunchMaintenanceTask,
+  type PrelaunchMaintenanceRunResult,
+  type PrelaunchMaintenanceTaskName,
+} from './prelaunch-maintenance-cache';
 
 
 export interface GatewayLaunchContext {
   appSettings: Awaited<ReturnType<typeof getAllSettings>>;
   openclawDir: string;
   entryScript: string;
-  pluginStageDir: string | null;
   gatewayArgs: string[];
   forkEnv: Record<string, string | undefined>;
   mode: 'dev' | 'packaged';
@@ -43,6 +57,12 @@ export interface GatewayLaunchContext {
   loadedProviderKeyCount: number;
   proxySummary: string;
   channelStartupSummary: string;
+}
+
+export interface GatewayPrelaunchSyncSummary {
+  timingsMs: Record<string, number>;
+  maintenance: Partial<Record<PrelaunchMaintenanceTaskName, PrelaunchMaintenanceRunResult>>;
+  configuredChannels: string[];
 }
 
 // ── Auto-upgrade bundled plugins on startup ──────────────────────
@@ -87,25 +107,6 @@ function readPluginVersion(pkgJsonPath: string): string | null {
   }
 }
 
-function collectPluginRuntimeDeps(pluginDir: string): string[] {
-  try {
-    const raw = readFileSync(fsPath(join(pluginDir, 'package.json')), 'utf-8');
-    const pkg = JSON.parse(raw) as { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> };
-    return Object.keys({
-      ...pkg.dependencies,
-      ...pkg.optionalDependencies,
-    });
-  } catch {
-    return [];
-  }
-}
-
-function hasPluginRuntimeDeps(pluginDir: string): boolean {
-  const deps = collectPluginRuntimeDeps(pluginDir);
-  if (deps.length === 0) return true;
-  return deps.every((depName) => existsSync(fsPath(join(pluginDir, 'node_modules', ...depName.split('/'), 'package.json'))));
-}
-
 function buildBundledPluginSources(pluginDirName: string): string[] {
   return app.isPackaged
     ? [
@@ -119,12 +120,39 @@ function buildBundledPluginSources(pluginDirName: string): string[] {
     ];
 }
 
+function measureSync<T>(timings: Record<string, number>, key: string, fn: () => T): T {
+  const startedAt = Date.now();
+  try {
+    return fn();
+  } finally {
+    timings[key] = Date.now() - startedAt;
+  }
+}
+
+async function measureAsync<T>(timings: Record<string, number>, key: string, fn: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await fn();
+  } finally {
+    timings[key] = Date.now() - startedAt;
+  }
+}
+
+function appVersionForCache(): string {
+  try {
+    return app.getVersion();
+  } catch {
+    return 'unknown';
+  }
+}
+
 /**
  * Auto-upgrade all configured channel plugins before Gateway start.
  * - Packaged mode: uses bundled plugins from resources/ (includes deps)
  * - Dev mode: falls back to node_modules/ with pnpm-aware dep collection
  */
-function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
+function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean {
+  let succeeded = true;
   for (const channelType of configuredChannels) {
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) continue;
@@ -142,7 +170,7 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
     if (bundledDir) {
       const sourceVersion = readPluginVersion(join(bundledDir, 'package.json'));
       // Install or upgrade if version differs or plugin not installed
-      if (!isInstalled || !hasPluginRuntimeDeps(targetDir) || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
+      if (!isInstalled || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
         logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (bundled)`);
         try {
           mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
@@ -151,6 +179,7 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
           fixupPluginManifest(targetDir);
         } catch (err) {
           logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin:`, err);
+          succeeded = false;
         }
       } else if (isInstalled) {
         // Same version already installed — still patch manifest ID in case it was
@@ -180,9 +209,11 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
         fixupPluginManifest(targetDir);
       } catch (err) {
         logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin from node_modules:`, err);
+        succeeded = false;
       }
     }
   }
+  return succeeded;
 }
 
 /**
@@ -191,7 +222,8 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): void {
  * from scanning residual plugin manifests that were installed by a previous
  * configuration but are no longer needed.
  */
-function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): void {
+function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): boolean {
+  let succeeded = true;
   const configuredSet = new Set(configuredChannels);
 
   for (const [channelType, pluginInfo] of Object.entries(CHANNEL_PLUGIN_MAP)) {
@@ -206,8 +238,67 @@ function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): void {
       rmSync(fsPath(targetDir), { recursive: true, force: true });
     } catch (err) {
       logger.warn(`[plugin] Failed to remove unconfigured channel plugin ${channelType}:`, err);
+      succeeded = false;
     }
   }
+  return succeeded;
+}
+
+function buildPluginSourceSignatures(configuredChannels: string[]): Record<string, unknown> {
+  const signatures: Record<string, unknown> = {};
+  for (const channelType of [...configuredChannels].sort()) {
+    const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
+    if (!pluginInfo) continue;
+    const bundledSources = buildBundledPluginSources(pluginInfo.dirName);
+    const bundledDir = bundledSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
+    const devPkgPath = join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/'));
+    const sourceDir = bundledDir || (!app.isPackaged ? devPkgPath : '');
+    signatures[channelType] = sourceDir
+      ? {
+        sourceDir,
+        manifest: pathSignature(join(sourceDir, 'openclaw.plugin.json')),
+        packageJson: pathSignature(join(sourceDir, 'package.json')),
+      }
+      : 'missing';
+  }
+  return signatures;
+}
+
+function buildPluginMaintenanceCacheKey(openclawDir: string, configuredChannels: string[]): string {
+  return buildPrelaunchMaintenanceCacheKey({
+    task: 'plugin-maintenance',
+    appVersion: appVersionForCache(),
+    openclawDir,
+    cwd: process.cwd(),
+    configuredChannels: [...configuredChannels].sort(),
+    extensionsDir: directoryChildrenSignature(join(homedir(), '.openclaw', 'extensions')),
+    sourceSignatures: buildPluginSourceSignatures(configuredChannels),
+  });
+}
+
+function buildSkillsSymlinkCleanupCacheKey(openclawDir: string): string {
+  const workspaceSkillsDir = join(getOpenClawConfigDir(), 'workspace', 'skills');
+  return buildPrelaunchMaintenanceCacheKey({
+    task: 'skills-symlink-cleanup',
+    appVersion: appVersionForCache(),
+    openclawDir,
+    skillsDir: getOpenClawSkillsDir(),
+    skillsDirSignature: directoryChildrenSignature(getOpenClawSkillsDir()),
+    workspaceSkillsDir,
+    workspaceSkillsDirSignature: directoryChildrenSignature(workspaceSkillsDir),
+  });
+}
+
+function buildRuntimeDepsCleanupCacheKey(openclawDir: string): string {
+  const runtimeDepsDir = join(getOpenClawConfigDir(), 'plugin-runtime-deps');
+  return buildPrelaunchMaintenanceCacheKey({
+    task: 'runtime-deps-cleanup',
+    appVersion: appVersionForCache(),
+    openclawDir,
+    currentOpenClawDir: getOpenClawResolvedDir(),
+    runtimeDepsDir,
+    runtimeDepsDirSignature: directoryChildrenSignature(runtimeDepsDir),
+  });
 }
 
 /**
@@ -244,29 +335,8 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
   const topNM = join(openclawDir, 'node_modules');
   let linkedCount = 0;
 
-  // Use 'junction' on Windows (no admin required); on other platforms the
-  // type argument is ignored by Node so 'junction' is harmless.
-  const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
-
   try {
     if (!existsSync(extDir)) return;
-
-    // Create openclaw self-reference so built-in extension runtime files can
-    // resolve bare `import 'openclaw/plugin-sdk/...'` via native ESM.
-    // Extensions ship their own package.json (e.g. "@openclaw/codex"),
-    // creating a separate package scope that prevents Node's ESM
-    // package-self-reference from reaching the openclaw root package.
-    // Only needed in packaged mode — in dev pnpm already provides resolution.
-    if (app.isPackaged) {
-      const selfRef = join(topNM, 'openclaw');
-      if (!existsSync(selfRef)) {
-        try {
-          mkdirSync(topNM, { recursive: true });
-          symlinkSync(openclawDir, selfRef, symlinkType);
-          linkedCount++;
-        } catch { /* skip on error — non-fatal */ }
-      }
-    }
 
     for (const ext of readdirSync(extDir, { withFileTypes: true })) {
       if (!ext.isDirectory()) continue;
@@ -287,7 +357,7 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
             if (existsSync(dest)) continue;
             try {
               mkdirSync(join(topNM, pkg.name), { recursive: true });
-              symlinkSync(join(scopeDir, sub.name), dest, symlinkType);
+              symlinkSync(join(scopeDir, sub.name), dest);
               linkedCount++;
             } catch { /* skip on error — non-fatal */ }
           }
@@ -296,7 +366,7 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
           if (existsSync(dest)) continue;
           try {
             mkdirSync(topNM, { recursive: true });
-            symlinkSync(join(extNM, pkg.name), dest, symlinkType);
+            symlinkSync(join(extNM, pkg.name), dest);
             linkedCount++;
           } catch { /* skip on error — non-fatal */ }
         }
@@ -317,22 +387,29 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
 
 export async function syncGatewayConfigBeforeLaunch(
   appSettings: Awaited<ReturnType<typeof getAllSettings>>,
-): Promise<void> {
+  openclawDir: string,
+): Promise<GatewayPrelaunchSyncSummary> {
+  const timingsMs: Record<string, number> = {};
+  const maintenance: GatewayPrelaunchSyncSummary['maintenance'] = {};
+  let configuredChannels: string[] = [];
+
   // Reset the extension-deps cache so that newly installed extensions
   // (e.g. user added a channel while the app was running) get their
   // node_modules linked on the next Gateway spawn.
   resetExtensionDepsLinked();
 
-  await syncProxyConfigToOpenClaw(appSettings, { preserveExistingWhenDisabled: true });
+  await measureAsync(timingsMs, 'proxySyncMs', async () => {
+    await syncProxyConfigToOpenClaw(appSettings, { preserveExistingWhenDisabled: true });
+  });
 
   try {
-    await sanitizeOpenClawConfig();
+    await measureAsync(timingsMs, 'sanitizeMs', sanitizeOpenClawConfig);
   } catch (err) {
     logger.warn('Failed to sanitize openclaw.json:', err);
   }
 
   try {
-    await cleanupDanglingWeChatPluginState();
+    await measureAsync(timingsMs, 'wechatStateCleanupMs', cleanupDanglingWeChatPluginState);
   } catch (err) {
     logger.warn('Failed to clean dangling WeChat plugin state before launch:', err);
   }
@@ -340,7 +417,7 @@ export async function syncGatewayConfigBeforeLaunch(
   // Remove stale copies of built-in extensions (Discord, Telegram) that
   // override OpenClaw's working built-in plugins and break channel loading.
   try {
-    cleanupStaleBuiltInExtensions();
+    measureSync(timingsMs, 'staleBuiltinExtensionCleanupMs', cleanupStaleBuiltInExtensions);
   } catch (err) {
     logger.warn('Failed to clean stale built-in extensions:', err);
   }
@@ -351,9 +428,29 @@ export async function syncGatewayConfigBeforeLaunch(
   // still discovered via the agents-skills-personal source, so the symlinks
   // are pure log noise.  Transitional workaround for openclaw/openclaw#59219.
   try {
-    cleanupAgentsSymlinkedSkills();
+    const result = measureSync(timingsMs, 'skillsCleanupMs', () => runCachedPrelaunchMaintenanceTask(
+      'skills-symlink-cleanup',
+      () => buildSkillsSymlinkCleanupCacheKey(openclawDir),
+      () => (cleanupAgentsSymlinkedSkills().failed ?? 0) === 0,
+    ));
+    maintenance['skills-symlink-cleanup'] = result;
   } catch (err) {
     logger.warn('Failed to clean .agents/skills-targeted skill symlinks:', err);
+  }
+
+  // Remove stale OpenClaw runtime-deps cache roots that point at an older
+  // worktree/package.  Those symlink trees can make Gateway plugin setup spend
+  // a long time in synchronous fs.open/copy calls before the RPC router is
+  // responsive.
+  try {
+    const result = measureSync(timingsMs, 'runtimeDepsCleanupMs', () => runCachedPrelaunchMaintenanceTask(
+      'runtime-deps-cleanup',
+      () => buildRuntimeDepsCleanupCacheKey(openclawDir),
+      () => (cleanupStalePluginRuntimeDeps().failed ?? 0) === 0,
+    ));
+    maintenance['runtime-deps-cleanup'] = result;
+  } catch (err) {
+    logger.warn('Failed to clean stale OpenClaw plugin runtime deps:', err);
   }
 
   // Auto-upgrade installed plugins before Gateway starts so that
@@ -361,21 +458,39 @@ export async function syncGatewayConfigBeforeLaunch(
   // Only install/upgrade plugins for channels that are actually configured
   // in openclaw.json — do NOT expand the list from plugins.allow.
   try {
-    const rawCfg = await readOpenClawConfig();
-    const configuredChannels = await listConfiguredChannelsFromConfig(rawCfg);
+    configuredChannels = await measureAsync(timingsMs, 'configuredChannelsMs', async () => {
+      const rawCfg = await readOpenClawConfig();
+      return await listConfiguredChannelsFromConfig(rawCfg);
+    });
 
-    ensureConfiguredPluginsUpgraded(configuredChannels);
-    cleanupUnconfiguredChannelPlugins(configuredChannels);
+    const result = measureSync(timingsMs, 'pluginMaintenanceMs', () => runCachedPrelaunchMaintenanceTask(
+      'plugin-maintenance',
+      () => buildPluginMaintenanceCacheKey(openclawDir, configuredChannels),
+      () => {
+        const upgradeOk = ensureConfiguredPluginsUpgraded(configuredChannels);
+        const cleanupOk = cleanupUnconfiguredChannelPlugins(configuredChannels);
+        return upgradeOk && cleanupOk;
+      },
+    ));
+    maintenance['plugin-maintenance'] = result;
   } catch (err) {
     logger.warn('Failed to auto-upgrade plugins:', err);
   }
 
   // Batch gateway token, browser config, and session idle into one read+write cycle.
   try {
-    await batchSyncConfigFields(appSettings.gatewayToken);
+    await measureAsync(timingsMs, 'configFieldSyncMs', async () => {
+      await batchSyncConfigFields(appSettings.gatewayToken);
+    });
   } catch (err) {
     logger.warn('Failed to batch-sync config fields to openclaw.json:', err);
   }
+
+  return {
+    timingsMs,
+    maintenance,
+    configuredChannels,
+  };
 }
 
 async function loadProviderEnv(): Promise<{ providerEnv: Record<string, string>; loadedProviderKeyCount: number }> {
@@ -447,16 +562,19 @@ async function resolveChannelStartupPolicy(): Promise<{
 }
 
 export async function prepareGatewayLaunchContext(port: number): Promise<GatewayLaunchContext> {
-  const openclawDir = getOpenClawRuntimeDir();
-  const entryScript = getOpenClawRuntimeEntryPath();
-  const pluginStageDir = getOpenClawPluginStageDir(openclawDir);
+  const timingsMs: Record<string, number> = {};
+  const totalStartedAt = Date.now();
+  const openclawDir = getOpenClawDir();
+  const entryScript = getOpenClawEntryPath();
 
   if (!isOpenClawPresent()) {
     throw new Error(`OpenClaw package not found at: ${openclawDir}`);
   }
 
-  const appSettings = await getAllSettings();
-  await syncGatewayConfigBeforeLaunch(appSettings);
+  const appSettings = await measureAsync(timingsMs, 'settingsMs', getAllSettings);
+  const prelaunchSummary = await measureAsync(timingsMs, 'prelaunchSyncMs', async () => (
+    await syncGatewayConfigBeforeLaunch(appSettings, openclawDir)
+  ));
 
   if (!existsSync(entryScript)) {
     throw new Error(`OpenClaw entry script not found at: ${entryScript}`);
@@ -473,9 +591,13 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     : path.join(process.cwd(), 'resources', 'bin', target);
   const binPathExists = existsSync(binPath);
 
-  const { providerEnv, loadedProviderKeyCount } = await loadProviderEnv();
-  const { skipChannels, channelStartupSummary } = await resolveChannelStartupPolicy();
-  const uvEnv = await getUvMirrorEnv();
+  const { providerEnv, loadedProviderKeyCount } = await measureAsync(timingsMs, 'providerEnvMs', loadProviderEnv);
+  const { skipChannels, channelStartupSummary } = await measureAsync(
+    timingsMs,
+    'channelStartupPolicyMs',
+    resolveChannelStartupPolicy,
+  );
+  const uvEnv = await measureAsync(timingsMs, 'uvEnvMs', getUvMirrorEnv);
   const proxyEnv = buildProxyEnv(appSettings);
   const resolvedProxy = resolveProxySettings(appSettings);
   const proxySummary = appSettings.proxyEnabled
@@ -496,19 +618,25 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     OPENCLAW_SKIP_CHANNELS: skipChannels ? '1' : '',
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',
-    ...(pluginStageDir ? { OPENCLAW_PLUGIN_STAGE_DIR: pluginStageDir } : {}),
   };
 
   // Ensure extension-specific packages (e.g. grammy from the telegram
   // extension) are resolvable by shared dist/ chunks via symlinks in
   // openclaw/node_modules/.  NODE_PATH does NOT work for ESM imports.
-  ensureExtensionDepsResolvable(openclawDir);
+  measureSync(timingsMs, 'extensionDepsMs', () => ensureExtensionDepsResolvable(openclawDir));
+  timingsMs.totalMs = Date.now() - totalStartedAt;
+
+  logger.info('[metric] gateway.prelaunch', {
+    ...prelaunchSummary.timingsMs,
+    ...timingsMs,
+    maintenance: prelaunchSummary.maintenance,
+    configuredChannelCount: prelaunchSummary.configuredChannels.length,
+  });
 
   return {
     appSettings,
     openclawDir,
     entryScript,
-    pluginStageDir,
     gatewayArgs,
     forkEnv,
     mode,

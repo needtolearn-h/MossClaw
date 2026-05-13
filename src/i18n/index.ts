@@ -15,6 +15,7 @@ import enChannels from './locales/en/channels.json';
 import enAgents from './locales/en/agents.json';
 import enSkills from './locales/en/skills.json';
 import enCron from './locales/en/cron.json';
+import enDreams from './locales/en/dreams.json';
 import enSetup from './locales/en/setup.json';
 import enLogin from './locales/en/login.json';
 
@@ -27,6 +28,7 @@ import zhChannels from './locales/zh/channels.json';
 import zhAgents from './locales/zh/agents.json';
 import zhSkills from './locales/zh/skills.json';
 import zhCron from './locales/zh/cron.json';
+import zhDreams from './locales/zh/dreams.json';
 import zhSetup from './locales/zh/setup.json';
 import zhLogin from './locales/zh/login.json';
 
@@ -39,6 +41,7 @@ import jaChannels from './locales/ja/channels.json';
 import jaAgents from './locales/ja/agents.json';
 import jaSkills from './locales/ja/skills.json';
 import jaCron from './locales/ja/cron.json';
+import jaDreams from './locales/ja/dreams.json';
 import jaSetup from './locales/ja/setup.json';
 import jaLogin from './locales/ja/login.json';
 
@@ -51,6 +54,7 @@ import ruChannels from './locales/ru/channels.json';
 import ruAgents from './locales/ru/agents.json';
 import ruSkills from './locales/ru/skills.json';
 import ruCron from './locales/ru/cron.json';
+import ruDreams from './locales/ru/dreams.json';
 import ruSetup from './locales/ru/setup.json';
 
 export const SUPPORTED_LANGUAGES = [
@@ -67,6 +71,7 @@ const resources = {
         agents: enAgents,
         skills: enSkills,
         cron: enCron,
+        dreams: enDreams,
         setup: enSetup,
         login: enLogin,
     },
@@ -79,6 +84,7 @@ const resources = {
         agents: zhAgents,
         skills: zhSkills,
         cron: zhCron,
+        dreams: zhDreams,
         setup: zhSetup,
         login: zhLogin,
     },
@@ -91,6 +97,7 @@ const resources = {
         agents: jaAgents,
         skills: jaSkills,
         cron: jaCron,
+        dreams: jaDreams,
         setup: jaSetup,
         login: jaLogin,
     },
@@ -103,6 +110,7 @@ const resources = {
         agents: ruAgents,
         skills: ruSkills,
         cron: ruCron,
+        dreams: ruDreams,
         setup: ruSetup,
     },
 };
@@ -115,7 +123,7 @@ i18n
         fallbackLng: 'zh',
         supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'agents', 'skills', 'cron', 'setup', 'login'],
+        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'agents', 'skills', 'cron', 'dreams', 'setup', 'login'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

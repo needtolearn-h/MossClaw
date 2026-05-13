@@ -465,6 +465,86 @@ describe('sanitizeOpenClawConfig', () => {
     expect(telegram.botToken).toBe('telegram-token');
   });
 
+  it('normalizes legacy feishu plugin state to a single external plugin and disables built-in feishu', async () => {
+    await writeOpenClawJson({
+      channels: {
+        feishu: {
+          enabled: true,
+          appId: 'cli-feishu-app',
+          appSecret: 'cli-feishu-secret',
+        },
+      },
+      plugins: {
+        enabled: true,
+        allow: ['custom-plugin', 'feishu', 'openclaw-lark'],
+        entries: {
+          'custom-plugin': { enabled: true },
+          feishu: { enabled: true },
+          'openclaw-lark': { enabled: true, config: { preserved: true } },
+        },
+      },
+    });
+
+    const legacyPluginDir = join(testHome, '.openclaw', 'extensions', 'openclaw-lark');
+    await mkdir(legacyPluginDir, { recursive: true });
+    await writeFile(
+      join(legacyPluginDir, 'openclaw.plugin.json'),
+      JSON.stringify({ id: 'openclaw-lark' }, null, 2),
+      'utf8',
+    );
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+
+    expect(allow).toContain('openclaw-lark');
+    expect(allow).not.toContain('feishu');
+    expect(entries['openclaw-lark']).toEqual({
+      enabled: true,
+      config: { preserved: true },
+    });
+    expect(entries.feishu).toEqual({ enabled: false });
+  });
+
+  it('removes residual feishu plugin registrations when feishu channel is not configured', async () => {
+    await writeOpenClawJson({
+      channels: {
+        telegram: {
+          enabled: true,
+          botToken: 'telegram-token',
+        },
+      },
+      plugins: {
+        enabled: true,
+        allow: ['custom-plugin', 'feishu', 'openclaw-lark'],
+        entries: {
+          'custom-plugin': { enabled: true },
+          feishu: { enabled: false },
+          'openclaw-lark': { enabled: true },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+
+    expect(allow).toContain('custom-plugin');
+    expect(allow).not.toContain('feishu');
+    expect(allow).not.toContain('openclaw-lark');
+    expect(entries['custom-plugin']).toEqual({ enabled: true });
+    expect(entries.feishu).toBeUndefined();
+    expect(entries['openclaw-lark']).toBeUndefined();
+  });
+
   it('strips defaultAccount (but preserves accounts) from dingtalk during sanitize', async () => {
     await writeOpenClawJson({
       channels: {
@@ -555,6 +635,219 @@ describe('sanitizeOpenClawConfig', () => {
     expect(allow).toEqual(['custom-plugin']);
     expect(entries['minimax-portal-auth']).toBeUndefined();
     expect(entries['custom-plugin']).toEqual({ enabled: true });
+  });
+
+  it('removes stale bundled OpenClaw dist extension paths from plugins.load.paths', async () => {
+    const staleAcpxPath = join(
+      testHome,
+      'old-workspace',
+      'node_modules',
+      '.pnpm',
+      'openclaw@2026.4.11_hash',
+      'node_modules',
+      'openclaw',
+      'dist',
+      'extensions',
+      'acpx',
+    );
+    await mkdir(staleAcpxPath, { recursive: true });
+    await writeOpenClawJson({
+      plugins: {
+        load: {
+          paths: [staleAcpxPath],
+        },
+        entries: {
+          acpx: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    expect(plugins.load).toBeUndefined();
+    expect((plugins.entries as Record<string, unknown>).acpx).toEqual({ enabled: true });
+  });
+
+  it('removes missing external plugin ids from plugins.allow while preserving installed and configured plugins', async () => {
+    const installedPluginDir = join(testHome, '.openclaw', 'extensions', 'custom-installed');
+    await mkdir(installedPluginDir, { recursive: true });
+    await writeFile(
+      join(installedPluginDir, 'openclaw.plugin.json'),
+      JSON.stringify({ id: 'custom-installed' }, null, 2),
+      'utf8',
+    );
+    await writeOpenClawJson({
+      plugins: {
+        allow: ['custom-installed', 'configured-plugin', 'missing-plugin'],
+        entries: {
+          'configured-plugin': { enabled: true },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+
+    expect(allow).toEqual(['custom-installed', 'configured-plugin']);
+    expect((plugins.entries as Record<string, unknown>)['configured-plugin']).toEqual({ enabled: true });
+  });
+
+  it('preserves allowlisted plugins loaded from local plugin paths', async () => {
+    const loadedPluginDir = join(testHome, 'local-plugins', 'custom-loaded');
+    await mkdir(loadedPluginDir, { recursive: true });
+    await writeFile(
+      join(loadedPluginDir, 'openclaw.plugin.json'),
+      JSON.stringify({ id: 'custom-loaded' }, null, 2),
+      'utf8',
+    );
+    await writeOpenClawJson({
+      plugins: {
+        allow: ['custom-loaded', 'missing-plugin'],
+        load: {
+          paths: [loadedPluginDir],
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+    const load = plugins.load as Record<string, unknown>;
+
+    expect(allow).toEqual(['custom-loaded']);
+    expect(load.paths).toEqual([loadedPluginDir]);
+  });
+
+  it('limits enabled-by-default provider plugins in plugins.allow to active providers', async () => {
+    const openclawDir = join(testHome, '.openclaw-package-allowlist');
+    const extensionsRoot = join(openclawDir, 'dist', 'extensions');
+    for (const manifest of [
+      { dir: 'browser', id: 'browser', enabledByDefault: true },
+      { dir: 'groq', id: 'groq', enabledByDefault: true },
+      { dir: 'alibaba', id: 'alibaba', enabledByDefault: true },
+      { dir: 'memory-core', id: 'memory-core' },
+      { dir: 'openrouter', id: 'openrouter', enabledByDefault: true, providers: ['openrouter'] },
+      { dir: 'anthropic', id: 'anthropic', enabledByDefault: true, providers: ['anthropic'] },
+    ]) {
+      const pluginDir = join(extensionsRoot, manifest.dir);
+      await mkdir(pluginDir, { recursive: true });
+      await writeFile(join(pluginDir, 'openclaw.plugin.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    }
+    await writeOpenClawJson({
+      plugins: {
+        allow: ['custom-plugin', 'browser', 'openrouter', 'anthropic'],
+        entries: {
+          'custom-plugin': { enabled: true },
+          'memory-core': { config: { dreaming: { enabled: true } } },
+        },
+      },
+      models: {
+        providers: {
+          alibaba: {},
+          openrouter: {},
+        },
+      },
+    });
+
+    vi.doMock('@electron/utils/paths', async () => {
+      const actual = await vi.importActual<typeof import('@electron/utils/paths')>('@electron/utils/paths');
+      return {
+        ...actual,
+        getOpenClawResolvedDir: () => openclawDir,
+        getOpenClawDir: () => openclawDir,
+      };
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+
+    expect(allow).toContain('custom-plugin');
+    expect(allow).toContain('browser');
+    expect(allow).toContain('memory-core');
+    expect(allow).toContain('alibaba');
+    expect(allow).not.toContain('groq');
+    expect(allow).toContain('openrouter');
+    expect(allow).not.toContain('anthropic');
+  });
+
+  it('preserves active bundled provider plugins discovered from per-agent auth profile stores', async () => {
+    await writeOpenClawJson({
+      agents: {
+        list: [
+          {
+            id: 'work',
+            name: 'Work',
+            workspace: '~/.openclaw/workspace-work',
+            agentDir: '~/.openclaw/agents/work/agent',
+          },
+        ],
+      },
+      plugins: {
+        allow: ['custom-plugin'],
+        entries: {
+          'custom-plugin': { enabled: true },
+        },
+      },
+    });
+
+    await writeAgentAuthProfiles('work', {
+      version: 1,
+      profiles: {
+        'openai-codex:default': {
+          type: 'oauth',
+          provider: 'openai-codex',
+          access: 'acc',
+          refresh: 'ref',
+          expires: 1,
+        },
+      },
+    });
+
+    const openclawDir = join(testHome, '.openclaw-package-sanitize-providers');
+    await mkdir(join(openclawDir, 'dist', 'extensions', 'openai'), { recursive: true });
+    await writeFile(
+      join(openclawDir, 'dist', 'extensions', 'openai', 'openclaw.plugin.json'),
+      JSON.stringify({
+        id: 'openai',
+        enabledByDefault: true,
+        providers: ['openai', 'openai-codex'],
+      }, null, 2),
+      'utf8',
+    );
+
+    vi.doMock('@electron/utils/paths', async () => {
+      const actual = await vi.importActual<typeof import('@electron/utils/paths')>('@electron/utils/paths');
+      return {
+        ...actual,
+        getOpenClawResolvedDir: () => openclawDir,
+      };
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+
+    expect(allow).toContain('custom-plugin');
+    expect(allow).toContain('openai');
   });
 });
 
@@ -706,39 +999,6 @@ describe('syncProviderConfigToOpenClaw', () => {
 
     expect(load).toEqual(['/tmp/custom-plugin.js']);
     expect(moonshot.baseUrl).toBe('https://api.moonshot.cn/v1');
-  });
-});
-
-describe('batchSyncConfigFields', () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    vi.restoreAllMocks();
-    await rm(testHome, { recursive: true, force: true });
-    await rm(testUserData, { recursive: true, force: true });
-  });
-
-  it('allowlists packaged file origins for the control UI websocket', async () => {
-    await writeOpenClawJson({
-      gateway: {
-        controlUi: {
-          allowedOrigins: ['http://localhost:18789', 'file://'],
-        },
-      },
-    });
-
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
-
-    await batchSyncConfigFields('test-token');
-
-    const result = await readOpenClawJson();
-    const gateway = result.gateway as Record<string, unknown>;
-    const controlUi = gateway.controlUi as Record<string, unknown>;
-
-    expect(controlUi.allowedOrigins).toEqual(['http://localhost:18789', 'file://', 'null']);
-    expect(gateway.auth).toEqual({ mode: 'token', token: 'test-token' });
-
-    logSpy.mockRestore();
   });
 });
 

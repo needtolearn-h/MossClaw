@@ -5,14 +5,14 @@
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, extname, basename } from 'node:path';
+import { join, extname, basename, resolve, sep, relative } from 'node:path';
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
 import {
   type ProviderConfig,
 } from '../utils/secure-storage';
-import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir } from '../utils/paths';
+import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir, expandPath } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
 import {
@@ -25,6 +25,11 @@ import { logger } from '../utils/logger';
 import { approvePairing } from '../utils/openclaw-pairing';
 import { resolveAgentIdFromChannel } from '../utils/agent-config';
 import { resolveAccountIdFromSessionHistory } from '../utils/session-util';
+import {
+  removeSessionEntry,
+  resolveSessionTranscriptPath,
+  sweepSessionArtefacts,
+} from '../utils/session-files';
 import {
   saveChannelConfig,
   getChannelConfig,
@@ -141,6 +146,9 @@ export function registerIpcHandlers(
   registerFileHandlers();
 
   registerLoginHandlers(mainWindow);
+
+  // File preview handlers (sandboxed read/write/list for inline viewer)
+  registerFilePreviewHandlers();
 }
 
 function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
@@ -1452,6 +1460,18 @@ function registerGatewayHandlers(
     }
   });
 
+  gatewayManager.on('gateway:health', (data) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('gateway:health-changed', data);
+    }
+  });
+
+  gatewayManager.on('gateway:presence', (data) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('gateway:presence-changed', data);
+    }
+  });
+
   gatewayManager.on('channel:status', (data) => {
     if (!mainWindow.isDestroyed()) {
       mainWindow.webContents.send('gateway:channel-status', data);
@@ -2105,6 +2125,14 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 /**
  * Shell-related IPC handlers
  */
+function expandShellPath(input: string): string {
+  if (input === '~') return homedir();
+  if (input.startsWith(`~${sep}`) || input.startsWith('~/') || input.startsWith('~\\')) {
+    return join(homedir(), input.slice(2));
+  }
+  return input;
+}
+
 function registerShellHandlers(): void {
   // Open external URL
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
@@ -2113,12 +2141,12 @@ function registerShellHandlers(): void {
 
   // Open path in file explorer
   ipcMain.handle('shell:showItemInFolder', async (_, path: string) => {
-    shell.showItemInFolder(path);
+    shell.showItemInFolder(expandShellPath(path));
   });
 
   // Open path
   ipcMain.handle('shell:openPath', async (_, path: string) => {
-    return await shell.openPath(path);
+    return await shell.openPath(expandShellPath(path));
   });
 }
 
@@ -2132,7 +2160,7 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
       const results = await clawHubService.search(params);
       return { success: true, results };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -2142,7 +2170,7 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
       await clawHubService.install(params);
       return { success: true };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -2152,7 +2180,7 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
       await clawHubService.uninstall(params);
       return { success: true };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -2162,7 +2190,7 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
       const results = await clawHubService.listInstalled();
       return { success: true, results };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -2523,19 +2551,48 @@ function registerFileHandlers(): void {
     }
   });
 
-  ipcMain.handle('media:getThumbnails', async (_, paths: Array<{ filePath: string; mimeType: string }>) => {
+  ipcMain.handle('media:getThumbnails', async (
+    _,
+    paths: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }>,
+  ) => {
     const fsP = await import('fs/promises');
     const results: Record<string, { preview: string | null; fileSize: number }> = {};
-    for (const { filePath, mimeType } of paths) {
-      try {
-        const s = await fsP.stat(filePath);
-        let preview: string | null = null;
-        if (mimeType.startsWith('image/')) {
-          preview = await generateImagePreview(filePath, mimeType);
+    for (const entry of paths) {
+      // Local on-disk file (the original code path).
+      if (entry.filePath) {
+        try {
+          const s = await fsP.stat(entry.filePath);
+          let preview: string | null = null;
+          if (entry.mimeType.startsWith('image/')) {
+            preview = await generateImagePreview(entry.filePath, entry.mimeType);
+          }
+          results[entry.filePath] = { preview, fileSize: s.size };
+        } catch {
+          results[entry.filePath] = { preview: null, fileSize: 0 };
         }
-        results[filePath] = { preview, fileSize: s.size };
-      } catch {
-        results[filePath] = { preview: null, fileSize: 0 };
+        continue;
+      }
+      // Gateway-injected outgoing media URL. The renderer cannot reach the
+      // Gateway HTTP server directly (CORS / env drift), so we resolve it
+      // here against OpenClaw's local outgoing media records and load the
+      // original file off disk. The URL shape is fixed by OpenClaw:
+      //   /api/chat/media/outgoing/<urlEncodedSessionKey>/<attachmentId>/full
+      if (entry.gatewayUrl) {
+        const resolved = await resolveOutgoingMediaUrl(entry.gatewayUrl);
+        if (!resolved) {
+          results[entry.gatewayUrl] = { preview: null, fileSize: 0 };
+          continue;
+        }
+        try {
+          const s = await fsP.stat(resolved.path);
+          let preview: string | null = null;
+          if (resolved.mimeType.startsWith('image/')) {
+            preview = await generateImagePreview(resolved.path, resolved.mimeType);
+          }
+          results[entry.gatewayUrl] = { preview, fileSize: s.size };
+        } catch {
+          results[entry.gatewayUrl] = { preview: null, fileSize: 0 };
+        }
       }
     }
     return results;
@@ -2543,13 +2600,72 @@ function registerFileHandlers(): void {
 }
 
 /**
+ * Resolve a Gateway-emitted outgoing-media URL to the original file on disk.
+ *
+ * OpenClaw's runtime stages every assistant `MEDIA:/path` artifact under
+ * `~/.openclaw/media/outgoing/`:
+ *   - `originals/<uuid>.<ext>`   — the source bytes copied verbatim
+ *   - `records/<attachmentId>.json` — `{ original: { path, contentType, ... }, ... }`
+ *
+ * The Gateway then injects an `assistant-media` content block with
+ * `url:'/api/chat/media/outgoing/<urlEncodedSessionKey>/<attachmentId>/full'`.
+ * We only need the `<attachmentId>` segment to look up the record.
+ */
+async function resolveOutgoingMediaUrl(
+  gatewayUrl: string,
+): Promise<{ path: string; mimeType: string } | null> {
+  try {
+    const m = gatewayUrl.match(/\/api\/chat\/media\/outgoing\/[^/]+\/([^/]+)\//);
+    if (!m) return null;
+    const attachmentId = decodeURIComponent(m[1]);
+    if (!/^[A-Za-z0-9._-]+$/.test(attachmentId)) return null;
+    const recordPath = join(homedir(), '.openclaw', 'media', 'outgoing', 'records', `${attachmentId}.json`);
+    const fsP = await import('fs/promises');
+    const raw = await fsP.readFile(recordPath, 'utf8');
+    const record = JSON.parse(raw) as {
+      original?: { path?: string; contentType?: string };
+    };
+    const original = record?.original;
+    if (!original?.path) return null;
+    return {
+      path: original.path,
+      mimeType: typeof original.contentType === 'string' && original.contentType
+        ? original.contentType
+        : 'application/octet-stream',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Session IPC handlers
  *
- * Performs a soft-delete of a session's JSONL transcript on disk.
+ * Performs a HARD delete of a session's JSONL transcript on disk.
  * sessionKey format: "agent:<agentId>:<suffix>" — e.g. "agent:main:session-1234567890".
- * The JSONL file lives at: ~/.openclaw/agents/<agentId>/sessions/<suffix>.jsonl
- * Renaming to <suffix>.deleted.jsonl hides it from sessions.list.
+ * The JSONL file lives at: ~/.openclaw/agents/<agentId>/sessions/<id>.jsonl
+ * (where <id> is typically a UUID resolved via sessions.json).
+ *
+ * For each deleted session we unlink every file that belongs to its on-disk id:
+ *   - <id>.jsonl                — the live transcript
+ *   - <id>.deleted.jsonl        — leftovers from earlier soft-delete releases
+ *   - <id>.jsonl.reset.*        — historical snapshots produced by sessions.reset
+ *   - <id>.trajectory.jsonl     — OpenClaw runtime "flight recorder" sidecar
+ *   - <id>.trajectory-path.json — pointer to the runtime trajectory; if it
+ *                                 points outside the sessions/ folder
+ *                                 (OPENCLAW_TRAJECTORY_DIR override) the
+ *                                 referenced file is unlinked too.
+ *
+ * The session entry is also removed from sessions.json so sessions.list stops
+ * surfacing it. Token-usage history reported by the Dashboard reads the same
+ * transcripts, so deleted conversations stop contributing to the chart.
+ *
+ * Path resolution and the sibling sweep are shared with the HTTP mirror at
+ * `electron/api/routes/sessions.ts` via `electron/utils/session-files.ts`,
+ * so both surfaces unlink the same set of files for a given session id.
  */
+const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
 function registerSessionHandlers(): void {
   ipcMain.handle('session:delete', async (_, sessionKey: string) => {
     try {
@@ -2563,6 +2679,13 @@ function registerSessionHandlers(): void {
       }
 
       const agentId = parts[1];
+      // Defence-in-depth: agentId becomes a path segment under
+      // ~/.openclaw/agents/.  Reject anything that could escape that root
+      // (".." segments, slashes, NULs, etc.) before touching the FS.
+      if (!SAFE_AGENT_ID.test(agentId)) {
+        return { success: false, error: `Invalid agentId: ${agentId}` };
+      }
+
       const openclawConfigDir = getOpenClawConfigDir();
       const sessionsDir = join(openclawConfigDir, 'agents', agentId, 'sessions');
       const sessionsJsonPath = join(sessionsDir, 'sessions.json');
@@ -2582,94 +2705,41 @@ function registerSessionHandlers(): void {
         return { success: false, error: `Could not read sessions.json: ${String(e)}` };
       }
 
-      // sessions.json structure: try common shapes used by OpenClaw Gateway:
-      //   Shape A (array):  { sessions: [{ key, file, ... }] }
-      //   Shape B (object): { [sessionKey]: { file, ... } }
-      //   Shape C (array):  { sessions: [{ key, id, ... }] }  — id is the UUID
-      let uuidFileName: string | undefined;
-
-      // Shape A / C — array under "sessions" key
-      if (Array.isArray(sessionsJson.sessions)) {
-        const entry = (sessionsJson.sessions as Array<Record<string, unknown>>)
-          .find((s) => s.key === sessionKey || s.sessionKey === sessionKey);
-        if (entry) {
-          // Could be "file", "fileName", "id" + ".jsonl", or "path"
-          uuidFileName = (entry.file ?? entry.fileName ?? entry.path) as string | undefined;
-          if (!uuidFileName && typeof entry.id === 'string') {
-            uuidFileName = `${entry.id}.jsonl`;
-          }
+      const resolution = resolveSessionTranscriptPath(sessionsJson, sessionsDir, sessionKey);
+      if (!resolution.ok) {
+        if (resolution.failure.kind === 'not-found') {
+          const rawVal = sessionsJson[sessionKey];
+          logger.warn(`[session:delete] Cannot resolve file for "${sessionKey}". Raw value: ${JSON.stringify(rawVal)}`);
+          return { success: false, error: `Cannot resolve file for session: ${sessionKey}` };
         }
+        logger.warn(`[session:delete] Refusing to delete out-of-scope path for "${sessionKey}": ${resolution.failure.resolvedPath}`);
+        return { success: false, error: `Resolved session path is outside the agent sessions dir: ${resolution.failure.resolvedPath}` };
       }
 
-      // Shape B — flat object keyed by sessionKey; value may be a string or an object.
-      // Actual Gateway format: { sessionFile: "/abs/path/uuid.jsonl", sessionId: "uuid", ... }
-      let resolvedSrcPath: string | undefined;
-
-      if (!uuidFileName && sessionsJson[sessionKey] != null) {
-        const val = sessionsJson[sessionKey];
-        if (typeof val === 'string') {
-          uuidFileName = val;
-        } else if (typeof val === 'object' && val !== null) {
-          const entry = val as Record<string, unknown>;
-          // Priority: absolute sessionFile path > relative file/fileName/path > id/sessionId as UUID
-          const absFile = (entry.sessionFile ?? entry.file ?? entry.fileName ?? entry.path) as string | undefined;
-          if (absFile) {
-            if (absFile.startsWith('/') || absFile.match(/^[A-Za-z]:\\/)) {
-              // Absolute path — use directly
-              resolvedSrcPath = absFile;
-            } else {
-              uuidFileName = absFile;
-            }
-          } else {
-            // Fall back to UUID fields
-            const uuidVal = (entry.id ?? entry.sessionId) as string | undefined;
-            if (uuidVal) uuidFileName = uuidVal.endsWith('.jsonl') ? uuidVal : `${uuidVal}.jsonl`;
-          }
-        }
-      }
-
-      if (!uuidFileName && !resolvedSrcPath) {
-        const rawVal = sessionsJson[sessionKey];
-        logger.warn(`[session:delete] Cannot resolve file for "${sessionKey}". Raw value: ${JSON.stringify(rawVal)}`);
-        return { success: false, error: `Cannot resolve file for session: ${sessionKey}` };
-      }
-
-      // Normalise: if we got a relative filename, resolve it against sessionsDir
-      if (!resolvedSrcPath) {
-        if (!uuidFileName!.endsWith('.jsonl')) uuidFileName = `${uuidFileName}.jsonl`;
-        resolvedSrcPath = join(sessionsDir, uuidFileName!);
-      }
-
-      const dstPath = resolvedSrcPath.replace(/\.jsonl$/, '.deleted.jsonl');
+      const { resolvedSrcPath, sessionsDirAbs, baseId } = resolution;
       logger.info(`[session:delete] file: ${resolvedSrcPath}`);
 
-      // ── Step 2: rename the JSONL file ──
-      try {
-        await fsP.access(resolvedSrcPath);
-        await fsP.rename(resolvedSrcPath, dstPath);
-        logger.info(`[session:delete] Renamed ${resolvedSrcPath} → ${dstPath}`);
-      } catch (e) {
-        logger.warn(`[session:delete] Could not rename file: ${String(e)}`);
+      // ── Step 2: hard-delete the JSONL transcript and its siblings ──
+      const sweep = await sweepSessionArtefacts(sessionsDirAbs, baseId);
+      for (const removedPath of sweep.removed) {
+        logger.info(`[session:delete] Unlinked ${removedPath}`);
       }
+      for (const { path: failedPath, error } of sweep.errors) {
+        logger.warn(`[session:delete] Failed to unlink ${failedPath}: ${String(error)}`);
+      }
+      logger.info(`[session:delete] Hard-deleted ${sweep.removed.length} file(s) for ${baseId}`);
 
       // ── Step 3: remove the entry from sessions.json ──
       try {
         // Re-read to avoid race conditions
         const raw2 = await fsP.readFile(sessionsJsonPath, 'utf8');
         const json2 = JSON.parse(raw2) as Record<string, unknown>;
-
-        if (Array.isArray(json2.sessions)) {
-          json2.sessions = (json2.sessions as Array<Record<string, unknown>>)
-            .filter((s) => s.key !== sessionKey && s.sessionKey !== sessionKey);
-        } else if (json2[sessionKey]) {
-          delete json2[sessionKey];
-        }
-
+        removeSessionEntry(json2, sessionKey);
         await fsP.writeFile(sessionsJsonPath, JSON.stringify(json2, null, 2), 'utf8');
         logger.info(`[session:delete] Removed "${sessionKey}" from sessions.json`);
       } catch (e) {
         logger.warn(`[session:delete] Could not update sessions.json: ${String(e)}`);
-        // Non-fatal — JSONL rename already done
+        // Non-fatal — transcript files were already unlinked.
       }
 
       return { success: true };
@@ -2680,6 +2750,418 @@ function registerSessionHandlers(): void {
   });
 }
 
+// ── File preview (sandboxed) ──────────────────────────────────────────
+//
+// IPC channels backing the in-app file preview / overlay components.
+// Reads, writes, dir listings and tree scans are restricted to a small
+// allowlist of roots so the renderer can never reach arbitrary disk paths
+// (defence in depth on top of contextIsolation).
+
+const FILE_PREVIEW_MAX_TEXT_BYTES = 2 * 1024 * 1024; // 2 MB
+// Binary preview ceiling for inline PDF / spreadsheet rendering.  Anything
+// over this still falls back to "open with system app" via the existing
+// confirmAndOpenFile flow so we never balloon the renderer with huge
+// buffers, but typical work-product PDFs / XLSX files (a few MB) sail
+// through.
+const FILE_PREVIEW_MAX_BINARY_BYTES = 50 * 1024 * 1024; // 50 MB
+const FILE_PREVIEW_TREE_MAX_DEPTH = 6;
+const FILE_PREVIEW_TREE_MAX_NODES = 5000;
+const FILE_PREVIEW_DIR_BLACKLIST = new Set([
+  'node_modules',
+  '.venv',
+  '__pycache__',
+  '.git',
+  'dist',
+  'build',
+  '.next',
+  '.turbo',
+  '.cache',
+]);
+
+interface FilePreviewTreeOptions {
+  maxDepth?: number;
+  maxNodes?: number;
+  includeHidden?: boolean;
+}
+
+interface FilePreviewTreeNode {
+  name: string;
+  relPath: string;
+  absPath: string;
+  isDir: boolean;
+  size?: number;
+  mtime?: number;
+  children?: FilePreviewTreeNode[];
+}
+
+function isPathInside(child: string, parent: string): boolean {
+  const c = resolve(child);
+  const p = resolve(parent);
+  // Windows file systems are case-insensitive: realpath() returns the
+  // on-disk casing while `homedir()` / `resolve()` may preserve whatever
+  // casing the OS reported, leading to false `outsideSandbox` rejections
+  // (e.g. `C:\Users\Foo\.openclaw\…` vs `c:\users\foo\.openclaw\…`).
+  // Compare case-insensitively on Windows; keep strict comparison on
+  // POSIX so we don't accidentally widen the sandbox there.
+  if (process.platform === 'win32') {
+    const cl = c.toLowerCase();
+    const pl = p.toLowerCase();
+    return cl === pl || cl.startsWith(pl + sep);
+  }
+  return c === p || c.startsWith(p + sep);
+}
+
+/**
+ * Roots inside which the file preview pipeline can READ AND WRITE.
+ * These are the user's own data directories — modifying them is safe.
+ */
+function getFilePreviewWriteRoots(): string[] {
+  const roots: string[] = [];
+  const openclawDir = join(homedir(), '.openclaw');
+  roots.push(resolve(openclawDir));
+  try {
+    roots.push(resolve(app.getPath('userData')));
+  } catch {
+    // ignore — userData should always exist
+  }
+  roots.push(resolve(OUTBOUND_DIR));
+  return roots;
+}
+
+interface ResolvedSandboxedPath {
+  realPath: string;
+  /** True when the resolved path lives in a read-only-only root (e.g. bundled skill). */
+  readOnly: boolean;
+}
+
+async function resolveSandboxedPath(
+  input: string,
+  mode: 'read' | 'write' = 'read',
+): Promise<ResolvedSandboxedPath> {
+  if (typeof input !== 'string' || !input.trim()) {
+    throw new Error('outsideSandbox');
+  }
+  // OpenClaw stores agent.workspace / agentDir paths as `~/.openclaw/...`
+  // literals; expand the tilde before realpath so sandbox resolution
+  // matches what the user actually sees on disk.
+  const expanded = expandPath(input);
+  const fsP = await import('fs/promises');
+  let real: string;
+  try {
+    real = await fsP.realpath(expanded);
+  } catch {
+    // Path may not exist yet (e.g. write that should fail later);
+    // resolve without realpath fallback so the sandbox check is still applied.
+    real = resolve(expanded);
+  }
+  const writeRoots = getFilePreviewWriteRoots();
+  if (writeRoots.some((root) => isPathInside(real, root))) {
+    return { realPath: real, readOnly: false };
+  }
+  if (mode === 'write') {
+    // Preview is broadly read-only, but mutations stay confined to the
+    // app-owned write roots. This avoids path-specific allowlists (which
+    // are fragile on Windows, OneDrive, localized folders, Chinese user
+    // names, etc.) while preserving a strict write boundary.
+    throw new Error('readOnlyRoot');
+  }
+
+  // Read-only preview should work for any real local path surfaced by the
+  // desktop app/runtime. `realpath()` above canonicalizes Windows casing,
+  // Unicode path segments and symlinks; individual handlers still enforce
+  // file-vs-directory checks, size caps, hidden directory skips and binary
+  // detection where appropriate.
+  return { realPath: real, readOnly: true };
+}
+
+function looksLikeBinary(buf: Buffer): boolean {
+  // Treat presence of a NUL byte in the first 8 KB as binary, matching
+  // the heuristic used by isbinaryfile / git.
+  const limit = Math.min(buf.length, 8192);
+  for (let i = 0; i < limit; i += 1) {
+    if (buf[i] === 0) return true;
+  }
+  return false;
+}
+
+function shouldSkipDirEntry(name: string, includeHidden: boolean): boolean {
+  if (FILE_PREVIEW_DIR_BLACKLIST.has(name)) return true;
+  if (!includeHidden && name.startsWith('.')) return true;
+  return false;
+}
+
+function shouldSkipFileEntry(name: string, includeHidden: boolean): boolean {
+  if (!includeHidden && name.startsWith('.')) return true;
+  return false;
+}
+
+function registerFilePreviewHandlers(): void {
+  ipcMain.handle('file:readText', async (_, inputPath: string) => {
+    try {
+      const { realPath: real, readOnly } = await resolveSandboxedPath(inputPath, 'read');
+      const fsP = await import('fs/promises');
+      const stat = await fsP.stat(real);
+      if (!stat.isFile()) {
+        return { ok: false, error: 'notFound' };
+      }
+      if (stat.size > FILE_PREVIEW_MAX_TEXT_BYTES) {
+        return { ok: false, error: 'tooLarge', size: stat.size };
+      }
+      const buf = await fsP.readFile(real);
+      if (looksLikeBinary(buf)) {
+        return { ok: false, error: 'binary', size: stat.size };
+      }
+      return {
+        ok: true,
+        content: buf.toString('utf8'),
+        mimeType: getMimeType(extname(real)),
+        size: stat.size,
+        readOnly,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'outsideSandbox') {
+        return { ok: false, error: 'outsideSandbox' };
+      }
+      if (message.includes('ENOENT')) {
+        return { ok: false, error: 'notFound' };
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  ipcMain.handle('file:readBinary', async (_, inputPath: string, opts?: { maxBytes?: number }) => {
+    try {
+      const { realPath: real, readOnly } = await resolveSandboxedPath(inputPath, 'read');
+      const fsP = await import('fs/promises');
+      const stat = await fsP.stat(real);
+      if (!stat.isFile()) {
+        return { ok: false, error: 'notFound' };
+      }
+      const cap = Math.max(
+        1,
+        Math.min(opts?.maxBytes ?? FILE_PREVIEW_MAX_BINARY_BYTES, FILE_PREVIEW_MAX_BINARY_BYTES),
+      );
+      if (stat.size > cap) {
+        return { ok: false, error: 'tooLarge', size: stat.size };
+      }
+      const buf = await fsP.readFile(real);
+      // Electron serialises Node Buffers as ArrayBuffer-backed Uint8Arrays
+      // through structured clone, so the renderer receives a Uint8Array
+      // without the heavyweight base64 round-trip.
+      const view = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+      return {
+        ok: true,
+        data: view,
+        mimeType: getMimeType(extname(real)),
+        size: stat.size,
+        readOnly,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'outsideSandbox') {
+        return { ok: false, error: 'outsideSandbox' };
+      }
+      if (message.includes('ENOENT')) {
+        return { ok: false, error: 'notFound' };
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  ipcMain.handle('file:writeText', async (_, inputPath: string, content: string) => {
+    try {
+      if (typeof content !== 'string') {
+        return { ok: false, error: 'invalidContent' };
+      }
+      if (Buffer.byteLength(content, 'utf8') > FILE_PREVIEW_MAX_TEXT_BYTES) {
+        return { ok: false, error: 'tooLarge' };
+      }
+      const { realPath: real } = await resolveSandboxedPath(inputPath, 'write');
+      const fsP = await import('fs/promises');
+      // Only allow writing existing files to avoid surprise creation.
+      let stat;
+      try {
+        stat = await fsP.stat(real);
+      } catch {
+        return { ok: false, error: 'notFound' };
+      }
+      if (!stat.isFile()) {
+        return { ok: false, error: 'notFound' };
+      }
+      await fsP.writeFile(real, content, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'outsideSandbox') {
+        return { ok: false, error: 'outsideSandbox' };
+      }
+      if (message === 'readOnlyRoot') {
+        return { ok: false, error: 'readOnlyRoot' };
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  ipcMain.handle('file:stat', async (_, inputPath: string) => {
+    try {
+      const { realPath: real, readOnly } = await resolveSandboxedPath(inputPath, 'read');
+      const fsP = await import('fs/promises');
+      const stat = await fsP.stat(real);
+      return {
+        ok: true,
+        size: stat.size,
+        mtime: stat.mtimeMs,
+        isFile: stat.isFile(),
+        isDir: stat.isDirectory(),
+        readOnly,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'outsideSandbox') {
+        return { ok: false, error: 'outsideSandbox' };
+      }
+      if (message.includes('ENOENT')) {
+        return { ok: false, error: 'notFound' };
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  ipcMain.handle('file:listDir', async (_, inputPath: string) => {
+    try {
+      const { realPath: real } = await resolveSandboxedPath(inputPath, 'read');
+      const fsP = await import('fs/promises');
+      const dirents = await fsP.readdir(real, { withFileTypes: true });
+      const entries = await Promise.all(dirents.map(async (entry) => {
+        const abs = join(real, entry.name);
+        let size = 0;
+        try {
+          if (entry.isFile()) {
+            size = (await fsP.stat(abs)).size;
+          }
+        } catch {
+          // non-fatal
+        }
+        return {
+          name: entry.name,
+          path: abs,
+          isDir: entry.isDirectory(),
+          size,
+        };
+      }));
+      return { ok: true, entries };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'outsideSandbox') {
+        return { ok: false, error: 'outsideSandbox' };
+      }
+      if (message.includes('ENOENT')) {
+        return { ok: false, error: 'notFound' };
+      }
+      return { ok: false, error: message };
+    }
+  });
+
+  ipcMain.handle('file:listTree', async (_, inputPath: string, opts?: FilePreviewTreeOptions) => {
+    try {
+      const { realPath: real } = await resolveSandboxedPath(inputPath, 'read');
+      const fsP = await import('fs/promises');
+      const stat = await fsP.stat(real);
+      if (!stat.isDirectory()) {
+        return { ok: false, error: 'notDirectory' };
+      }
+      const maxDepth = Math.max(1, Math.min(opts?.maxDepth ?? FILE_PREVIEW_TREE_MAX_DEPTH, 12));
+      const maxNodes = Math.max(1, Math.min(opts?.maxNodes ?? FILE_PREVIEW_TREE_MAX_NODES, 50000));
+      const includeHidden = !!opts?.includeHidden;
+
+      let nodeCount = 0;
+      let truncated = false;
+
+      const walk = async (
+        absDir: string,
+        depth: number,
+      ): Promise<FilePreviewTreeNode[] | undefined> => {
+        if (depth > maxDepth || truncated) return undefined;
+        let dirents;
+        try {
+          dirents = await fsP.readdir(absDir, { withFileTypes: true });
+        } catch {
+          return [];
+        }
+        const children: FilePreviewTreeNode[] = [];
+        for (const entry of dirents) {
+          if (truncated) break;
+          const isDir = entry.isDirectory();
+          const isFile = entry.isFile();
+          if (!isDir && !isFile) continue;
+          if (isDir && shouldSkipDirEntry(entry.name, includeHidden)) continue;
+          if (isFile && shouldSkipFileEntry(entry.name, includeHidden)) continue;
+          if (nodeCount >= maxNodes) {
+            truncated = true;
+            break;
+          }
+          nodeCount += 1;
+          const abs = join(absDir, entry.name);
+          // Normalise relPath to forward slashes for renderer use — the
+          // renderer derives the same value cross-platform when looking
+          // up a node by path, and Windows backslashes look out of place
+          // in URLs / display strings.
+          const rel = relative(real, abs).split(sep).join('/');
+          const node: FilePreviewTreeNode = {
+            name: entry.name,
+            relPath: rel,
+            absPath: abs,
+            isDir,
+          };
+          if (isFile) {
+            try {
+              const fstat = await fsP.stat(abs);
+              node.size = fstat.size;
+              node.mtime = fstat.mtimeMs;
+            } catch {
+              // non-fatal
+            }
+          } else if (isDir) {
+            try {
+              const fstat = await fsP.stat(abs);
+              node.mtime = fstat.mtimeMs;
+            } catch {
+              // non-fatal
+            }
+            node.children = await walk(abs, depth + 1) ?? [];
+          }
+          children.push(node);
+        }
+        children.sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        return children;
+      };
+
+      const root: FilePreviewTreeNode = {
+        name: basename(real) || real,
+        relPath: '',
+        absPath: real,
+        isDir: true,
+        mtime: stat.mtimeMs,
+        children: (await walk(real, 1)) ?? [],
+      };
+
+      return { ok: true, root, truncated };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'outsideSandbox') {
+        return { ok: false, error: 'outsideSandbox' };
+      }
+      if (message.includes('ENOENT')) {
+        return { ok: false, error: 'notFound' };
+      }
+      return { ok: false, error: message };
+    }
+  });
+}
 /**
  * 注册登录相关的 IPC 处理器
  * 用于在需要显示登录界面时重新加载主页面

@@ -70,6 +70,7 @@ test.describe('ClawX provider lifecycle', () => {
       const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
       let accounts: Array<Record<string, unknown>> = [];
+      let keyInfo: Array<{ accountId: string; hasKey: boolean; keyMasked: string | null }> = [];
       let statuses: Array<Record<string, unknown>> = [];
       let defaultAccountId: string | null = null;
 
@@ -88,12 +89,13 @@ test.describe('ClawX provider lifecycle', () => {
         const method = request?.method ?? 'GET';
         const body = request?.body ? JSON.parse(request.body) : null;
 
+        // New account-based endpoints (preferred path).
         if (path === '/api/provider-accounts' && method === 'GET') return respond(accounts);
-        if (path === '/api/providers' && method === 'GET') return respond(statuses);
+        if (path === '/api/provider-accounts/key-info' && method === 'GET') return respond(keyInfo);
         if (path === '/api/provider-vendors' && method === 'GET') return respond([]);
         if (path === '/api/provider-accounts/default' && method === 'GET') return respond({ accountId: defaultAccountId });
 
-        if (path === '/api/providers/validate' && method === 'POST') {
+        if (path === '/api/provider-accounts/validate' && method === 'POST') {
           if (body?.apiKey !== 'sk-lm-test') {
             return respond({ valid: false, error: `unexpected key: ${String(body?.apiKey)}` }, 400);
           }
@@ -102,6 +104,12 @@ test.describe('ClawX provider lifecycle', () => {
 
         if (path === '/api/provider-accounts' && method === 'POST') {
           accounts = [body.account];
+          keyInfo = [{
+            accountId: body.account.id,
+            hasKey: Boolean(body.apiKey),
+            keyMasked: body.apiKey ? 'sk-***' : null,
+          }];
+          // Keep statuses populated for any consumer still on the legacy path.
           statuses = [{
             id: body.account.id,
             name: body.account.label,
@@ -122,6 +130,19 @@ test.describe('ClawX provider lifecycle', () => {
           return respond({ success: true });
         }
 
+        // ── Legacy compatibility shims ─────────────────────────────
+        // Older renderer builds still reach for these. Keeping them
+        // wired up here exercises the backward-compat path in the
+        // route layer (it returns the same data, just without the
+        // newer key-info payload structure).
+        if (path === '/api/providers' && method === 'GET') return respond(statuses);
+        if (path === '/api/providers/validate' && method === 'POST') {
+          if (body?.apiKey !== 'sk-lm-test') {
+            return respond({ valid: false, error: `unexpected key: ${String(body?.apiKey)}` }, 400);
+          }
+          return respond({ valid: true });
+        }
+
         return respond({});
       });
     });
@@ -140,5 +161,83 @@ test.describe('ClawX provider lifecycle', () => {
     await page.getByTestId('add-provider-submit-button').click();
 
     await expect(page.getByTestId('provider-card-custom')).toContainText('LM Studio Local');
+  });
+
+  test('edit form validates the new API key inline before saving (single button)', async ({ electronApp, page }) => {
+    await completeSetup(page);
+
+    await electronApp.evaluate(async ({ app: _app }) => {
+      const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+
+      const provider = {
+        id: 'moonshot-edit',
+        vendorId: 'moonshot',
+        label: 'Moonshot Edit',
+        authMode: 'api_key',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        model: 'kimi-k2.6',
+        enabled: true,
+        isDefault: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      let storedKey = 'sk-existing';
+      let keyInfo = [{ accountId: provider.id, hasKey: true, keyMasked: 'sk-***' }];
+
+      const respond = (json: unknown, status = 200) => ({
+        ok: true,
+        data: {
+          status,
+          ok: status >= 200 && status < 300,
+          json,
+        },
+      });
+
+      ipcMain.removeHandler('hostapi:fetch');
+      ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string; body?: string | null }) => {
+        const path = request?.path ?? '';
+        const method = request?.method ?? 'GET';
+        const body = request?.body ? JSON.parse(request.body) : null;
+
+        if (path === '/api/provider-accounts' && method === 'GET') return respond([provider]);
+        if (path === '/api/provider-accounts/key-info' && method === 'GET') return respond(keyInfo);
+        if (path === '/api/provider-vendors' && method === 'GET') return respond([]);
+        if (path === '/api/provider-accounts/default' && method === 'GET') return respond({ accountId: provider.id });
+
+        if (path === '/api/provider-accounts/validate' && method === 'POST') {
+          if (body?.apiKey === 'sk-good') {
+            return respond({ valid: true });
+          }
+          return respond({ valid: false, error: 'Invalid API key' }, 400);
+        }
+
+        if (path.startsWith('/api/provider-accounts/') && method === 'PUT') {
+          if (body?.apiKey) storedKey = body.apiKey;
+          keyInfo = [{ accountId: provider.id, hasKey: Boolean(storedKey), keyMasked: 'sk-***' }];
+          return respond({ success: true });
+        }
+
+        if (path === '/api/providers' && method === 'GET') return respond([provider]);
+
+        return respond({});
+      });
+    });
+
+    await page.getByTestId('sidebar-nav-models').click();
+    await expect(page.getByTestId('providers-settings')).toBeVisible();
+    await expect(page.getByTestId('provider-card-moonshot-edit')).toBeVisible();
+
+    await page.getByTestId('provider-card-moonshot-edit').hover();
+    await page.getByTestId('provider-edit-moonshot-edit').click();
+
+    await page.getByTestId('provider-edit-key-input-moonshot-edit').fill('sk-bad');
+    await page.getByTestId('provider-edit-save-moonshot-edit').click();
+    await expect(page.getByTestId('provider-edit-validation-error-moonshot-edit')).toContainText('Invalid API key');
+
+    await page.getByTestId('provider-edit-key-input-moonshot-edit').fill('sk-good');
+    await expect(page.getByTestId('provider-edit-validation-error-moonshot-edit')).toHaveCount(0);
+    await page.getByTestId('provider-edit-save-moonshot-edit').click();
+
+    await expect(page.getByTestId('provider-edit-save-moonshot-edit')).toHaveCount(0);
   });
 });

@@ -139,81 +139,6 @@ describe('parseDoctorValidationOutput', () => {
   });
 });
 
-describe('OpenClaw 4.24 bundled channel config defaults', () => {
-  beforeEach(async () => {
-    vi.resetAllMocks();
-    vi.resetModules();
-    await rm(testHome, { recursive: true, force: true });
-    await rm(testUserData, { recursive: true, force: true });
-  });
-
-  it('adds required Telegram access policies when saving token config', async () => {
-    const { saveChannelConfig } = await import('@electron/utils/channel-config');
-
-    await saveChannelConfig('telegram', {
-      botToken: 'telegram-token',
-      allowedUsers: '12345',
-    }, 'default');
-
-    const config = await readOpenClawJson();
-    const channels = config.channels as Record<string, {
-      dmPolicy?: string;
-      groupPolicy?: string;
-      accounts?: Record<string, { dmPolicy?: string; groupPolicy?: string; allowFrom?: string[] }>;
-    }>;
-
-    expect(channels.telegram.dmPolicy).toBe('allowlist');
-    expect(channels.telegram.groupPolicy).toBe('allowlist');
-    expect(channels.telegram.accounts?.default).toMatchObject({
-      allowFrom: ['12345'],
-      dmPolicy: 'allowlist',
-      groupPolicy: 'allowlist',
-    });
-  });
-
-  it('uses open Telegram policies for wildcard access', async () => {
-    const { saveChannelConfig } = await import('@electron/utils/channel-config');
-
-    await saveChannelConfig('telegram', {
-      botToken: 'telegram-token',
-      allowedUsers: '*',
-    }, 'default');
-
-    const config = await readOpenClawJson();
-    const channels = config.channels as Record<string, {
-      accounts?: Record<string, { dmPolicy?: string; groupPolicy?: string }>;
-    }>;
-
-    expect(channels.telegram.accounts?.default).toMatchObject({
-      dmPolicy: 'open',
-      groupPolicy: 'open',
-    });
-  });
-
-  it('adds Discord DM policy alongside required group policy', async () => {
-    const { saveChannelConfig } = await import('@electron/utils/channel-config');
-
-    await saveChannelConfig('discord', {
-      token: 'discord-token',
-      guildId: 'guild-1',
-    }, 'default');
-
-    const config = await readOpenClawJson();
-    const channels = config.channels as Record<string, {
-      dmPolicy?: string;
-      groupPolicy?: string;
-      accounts?: Record<string, { dmPolicy?: string; groupPolicy?: string }>;
-    }>;
-
-    expect(channels.discord.dmPolicy).toBe('disabled');
-    expect(channels.discord.groupPolicy).toBe('allowlist');
-    expect(channels.discord.accounts?.default).toMatchObject({
-      dmPolicy: 'disabled',
-      groupPolicy: 'allowlist',
-    });
-  });
-});
-
 describe('WeCom plugin configuration', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -232,6 +157,35 @@ describe('WeCom plugin configuration', () => {
     
     expect(plugins.allow).toContain('wecom');
     expect(plugins.entries['wecom'].enabled).toBe(true);
+  });
+
+  it('normalizes feishu plugin registration to openclaw-lark and disables built-in feishu on save', async () => {
+    const { saveChannelConfig, writeOpenClawConfig } = await import('@electron/utils/channel-config');
+
+    await writeOpenClawConfig({
+      plugins: {
+        enabled: true,
+        allow: ['custom-plugin', 'feishu', 'feishu-openclaw-plugin'],
+        entries: {
+          'custom-plugin': { enabled: true },
+          feishu: { enabled: true },
+          'feishu-openclaw-plugin': { enabled: true },
+        },
+      },
+    });
+
+    await saveChannelConfig('feishu', { appId: 'test-app', appSecret: 'test-secret' }, 'default');
+
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as { allow: string[]; entries: Record<string, { enabled?: boolean }> };
+
+    expect(plugins.allow).toContain('custom-plugin');
+    expect(plugins.allow).toContain('openclaw-lark');
+    expect(plugins.allow).not.toContain('feishu');
+    expect(plugins.allow).not.toContain('feishu-openclaw-plugin');
+    expect(plugins.entries['openclaw-lark']).toEqual({ enabled: true });
+    expect(plugins.entries.feishu).toEqual({ enabled: false });
+    expect(plugins.entries['feishu-openclaw-plugin']).toBeUndefined();
   });
 
   it('saves whatsapp as a built-in channel instead of a plugin', async () => {

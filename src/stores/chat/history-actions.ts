@@ -48,7 +48,10 @@ export function createHistoryActions(
   return {
     loadHistory: async (quiet = false) => {
       const { currentSessionKey } = get();
-      const isInitialForegroundLoad = !quiet && !foregroundHistoryLoadSeen.has(currentSessionKey);
+      const gatewayState = useGatewayStore.getState?.() as { status?: { pid?: number; connectedAt?: number; port?: number } } | undefined;
+      const gatewayStatus = gatewayState?.status;
+      const foregroundLoadKey = `${gatewayStatus?.pid ?? 'none'}:${gatewayStatus?.connectedAt ?? 'none'}:${gatewayStatus?.port ?? 'none'}|${currentSessionKey}`;
+      const isInitialForegroundLoad = !quiet && !foregroundHistoryLoadSeen.has(foregroundLoadKey);
       const historyTimeoutOverride = getStartupHistoryTimeoutOverride(isInitialForegroundLoad);
       if (!quiet) set({ loading: true, error: null });
 
@@ -119,13 +122,26 @@ export function createHistoryActions(
           if (!userMsTs || !msg.timestamp) return true;
           return toMs(msg.timestamp) >= userMsTs;
         };
-        const latestTerminalAssistantError = [...filteredMessages].reverse().find((msg) => (
-          msg.role === 'assistant'
-          && getMessageStopReason(msg) === 'error'
-          && isAfterUserMsg(msg)
-        ));
-        const latestTerminalAssistantErrorMessage = latestTerminalAssistantError
-          ? getMessageErrorMessage(latestTerminalAssistantError)
+        const isRealUserBoundary = (msg: RawMessage): boolean => {
+          if (msg.role !== 'user') return false;
+          if (!Array.isArray(msg.content)) return true;
+          const blocks = msg.content as Array<{ type?: string }>;
+          return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');
+        };
+        const postBoundaryMessages = userMsTs
+          ? filteredMessages.filter((msg) => isAfterUserMsg(msg))
+          : (() => {
+              for (let i = filteredMessages.length - 1; i >= 0; i -= 1) {
+                if (isRealUserBoundary(filteredMessages[i])) {
+                  return filteredMessages.slice(i + 1);
+                }
+              }
+              return filteredMessages;
+            })();
+        const lastAssistantAfterBoundary = [...postBoundaryMessages].reverse().find((msg) => msg.role === 'assistant');
+        const latestTerminalAssistantErrorMessage = lastAssistantAfterBoundary
+          && getMessageStopReason(lastAssistantAfterBoundary) === 'error'
+          ? getMessageErrorMessage(lastAssistantAfterBoundary)
           : null;
 
         set({
@@ -265,7 +281,7 @@ export function createHistoryActions(
           }
           const applied = applyLoadedMessages(rawMessages, thinkingLevel);
           if (applied && isInitialForegroundLoad) {
-            foregroundHistoryLoadSeen.add(currentSessionKey);
+            foregroundHistoryLoadSeen.add(foregroundLoadKey);
           }
           return;
         }
@@ -284,7 +300,7 @@ export function createHistoryActions(
         if (fallbackMessages.length > 0) {
           const applied = applyLoadedMessages(fallbackMessages, null);
           if (applied && isInitialForegroundLoad) {
-            foregroundHistoryLoadSeen.add(currentSessionKey);
+            foregroundHistoryLoadSeen.add(foregroundLoadKey);
           }
         } else if (errorKind === 'gateway_startup') {
           // Suppress error UI for gateway startup -- the history will load
@@ -304,7 +320,7 @@ export function createHistoryActions(
         if (fallbackMessages.length > 0) {
           const applied = applyLoadedMessages(fallbackMessages, null);
           if (applied && isInitialForegroundLoad) {
-            foregroundHistoryLoadSeen.add(currentSessionKey);
+            foregroundHistoryLoadSeen.add(foregroundLoadKey);
           }
         } else {
           applyLoadFailure(String(err));
